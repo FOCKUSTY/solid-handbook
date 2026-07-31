@@ -1,4 +1,4 @@
-# Принцип откытости-закрытости
+# Принцип открытости-закрытости
 
 _Далее: OCP (open-closed principle)_
 
@@ -38,7 +38,7 @@ export class NotificationService {
       return console.log(`Sending Push: ${message}`);
     }
 
-    throw new Error("Unvalid notification type");
+    throw new Error("Invalid notification type");
   }
 }
 ```
