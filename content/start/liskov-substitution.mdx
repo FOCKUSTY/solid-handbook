@@ -1,0 +1,287 @@
+# Подстановка Барбары Лисков
+
+_Далее: LSP (liskov substitution principle)_
+
+**Принцип** звучит так:
+
+> Объекты в программе должны быть заменяемы экземплярами их подтипов без изменения правильности выполнения программы.
+
+Если проще: **наследник должен дополнять, а не заменять поведение родителя**.
+
+Звучит сложно, но на самом деле это простая идея. Давай разбираться.
+
+---
+
+## Пример из жизни
+
+Представь, что у тебя есть интернет-магазин. Есть обычные пользователи и есть VIP-пользователи.
+VIP-пользователи — это тоже пользователи, но с бонусами.
+
+Если в коде магазина везде используется класс `User`,
+то мы должны иметь возможность подставить `VipUser` вместо `User`, и всё должно работать.
+
+Если после замены что-то ломается — значит, мы нарушили принцип Лисков.
+
+## Наследование — это не всегда "является"
+
+Самая частая ошибка — использовать наследование, когда между классами нет логической связи "является" (is-a).
+
+Вот классический пример нарушения:
+
+```typescript
+export class Bird {
+  public fly(): void {
+    return console.log("Flying...");
+  }
+}
+
+export class Penguin extends Bird {
+  public fly(): void {
+    throw new Error("I can't fly!");
+  }
+}
+
+const makeBirdFly = (bird: Bird): void => {
+  return bird.fly(); // Упс! Для пингвина выбросит ошибку
+};
+```
+
+На первый взгляд, `Penguin` наследуется от `Bird` — логично.
+Но метод `fly()` у пингвина не работает.
+Если мы подставим `Penguin` вместо `Bird` в функцию `makeBirdFly`, программа упадёт. Это нарушение LSP.
+
+## Хороший пример
+
+Правильный подход — разделить интерфейсы так, чтобы каждый класс реализовывал только то, что ему действительно нужно.
+
+```typescript
+export type Bird = {
+  eat(): void;
+  sleep(): void;
+};
+
+export type FlyingBird = Bird & {
+  fly(): void;
+};
+
+export class Sparrow implements FlyingBird {
+  public eat(): void {
+    return console.log("Sparrow is eating");
+  }
+
+  public sleep(): void {
+    return console.log("Sparrow is sleeping");
+  }
+
+  public fly(): void {
+    return console.log("Sparrow is flying");
+  }
+}
+
+export class Penguin implements Bird {
+  public eat(): void {
+    return console.log("Penguin is eating");
+  }
+
+  public sleep(): void {
+    return console.log("Penguin is sleeping");
+  }
+}
+
+export const handleBird = (bird: Bird): void => {
+  bird.eat();
+  bird.sleep();
+};
+
+export const handleFlyingBird = (bird: FlyingBird): void => {
+  bird.eat();
+  bird.sleep();
+  bird.fly();
+};
+
+const sparrow = new Sparrow();
+const penguin = new Penguin();
+
+handleBird(sparrow); // OK
+handleBird(penguin); // OK
+
+handleFlyingBird(sparrow); // OK
+handleFlyingBird(penguin); // Ошибка компиляции! Penguin не реализует FlyingBird
+```
+
+Теперь:
+
+- И `Sparrow`, и `Penguin` — это птицы. Оба могут есть и спать.
+- Но только `Sparrow` умеет летать, потому что реализует `FlyingBird`.
+- Мы не можем передать пингвина туда, где ожидают летающую птицу. Компилятор нас защищает.
+
+**Это правильное наследование — наследник дополняет, а не заменяет поведение.**
+
+---
+
+## Ещё один плохой пример
+
+Частая ошибка в реальных проектах — переопределять метод родителя так, что он начинает делать что-то другое.
+
+```typescript
+export class Rectangle {
+  protected _width: number;
+  protected _height: number;
+
+  public constructor(width: number, height: number) {
+    this._width = width;
+    this._height = height;
+  }
+
+  public get width(): number {
+    return this.width;
+  }
+
+  public get height(): number {
+    return this.height;
+  }
+
+  public set width(width: number) {
+    this.width = width;
+  }
+
+  public set height(height: number) {
+    this.height = height;
+  }
+
+  public getArea(): number {
+    return this.width * this.height;
+  }
+}
+
+export class Square extends Rectangle {
+  public override set width(width: number) {
+    this.width = width;
+    this.height = width;
+  }
+
+  public override set height(height: number) {
+    this.width = height;
+    this.height = height;
+  }
+}
+
+const resizeRectangle = (
+  rectangle: Rectangle,
+  width: number,
+  height: number,
+): void => {
+  rectangle.width = width;
+  rectangle.height = height;
+  // Мы ожидаем, что площадь станет width * height
+  // Но если передали Square — площадь станет height * height!
+};
+```
+
+Если в функцию `resizeRectangle` передать `Square`, она сломается — площадь будет неправильной. Это нарушение LSP.
+
+---
+
+## Правильное решение для этого примера
+
+Вместо наследования используем композицию или выделяем общий интерфейс:
+
+```typescript
+export type Shape = {
+  getArea(): number;
+};
+
+export class Rectangle implements Shape {
+  private _width: number;
+  private _height: number;
+
+  public constructor(width: number, height: number) {
+    this._width = width;
+    this._height = height;
+  }
+
+  public get width(): number {
+    return this.width;
+  }
+
+  public get height(): number {
+    return this.height;
+  }
+
+  public set width(width: number) {
+    this.width = width;
+  }
+
+  public set height(height: number) {
+    this.height = height;
+  }
+
+  public getArea(): number {
+    return this.width * this.height;
+  }
+}
+
+export class Square implements Shape {
+  private _side: number;
+
+  public constructor(side: number) {
+    this._side = side;
+  }
+
+  public get side(): number {
+    return this._side;
+  }
+
+  public set side(side: number): void {
+    this._side = side;
+  }
+
+  public getArea(): number {
+    return this._side ** 2;
+  }
+}
+
+export const printArea = (shape: Shape): void => {
+  return console.log(`Area: ${shape.getArea()}`);
+};
+
+const rectangle = new Rectangle(10, 20);
+const square = new Square(10);
+
+printArea(rectangle); // Area: 200
+printArea(square); // Area: 100
+```
+
+Теперь:
+
+- `Rectangle` и `Square` — независимые классы, реализующие интерфейс `Shape`.
+- У каждого своя логика, и они не мешают друг другу.
+- Мы можем подставить любой `Shape` в функцию `printArea`, и всё будет работать.
+
+---
+
+## Как проверить, что ты не нарушаешь LSP?
+
+Задай себе три вопроса:
+
+1. **Могу ли я подставить наследника вместо родителя без изменения кода?** Если да — всё ок.
+2. **Наследник не ослабляет контракт родителя?** (Не выбрасывает исключения там, где родитель их не выбрасывал, не возвращает `null` вместо объекта).
+3. **Наследник не усиливает предусловия?** (Не требует дополнительных условий для работы).
+
+Если хотя бы на один вопрос ответ "нет" — скорее всего, ты нарушаешь LSP.
+
+---
+
+## Итог
+
+**LSP** — это про правильное наследование. Он говорит нам:
+
+- Не наследуй просто потому, что "похоже".
+- Наследник должен полностью соответствовать поведению родителя.
+- Если наследник не может сделать что-то из родительского интерфейса — значит, ты неправильно спроектировал иерархию.
+
+Помни:
+
+> Если это "является" (is-a) — используй наследование. Если это "имеет" (has-a) — используй композицию.
+
+Композиция часто безопаснее наследования, потому что она не создаёт жёстких связей между классами.

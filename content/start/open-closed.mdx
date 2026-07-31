@@ -1,0 +1,208 @@
+# Принцип откытости-закрытости
+
+_Далее: OCP (open-closed principle)_
+
+Принцип звучит так:
+
+> Программные сущности должны быть **открыты для расширения**, но **закрыты для изменения**.
+
+---
+
+## Пример из жизни
+
+Представь, что ты купил компьютер.
+У него есть слоты для оперативной памяти и видеокарты.
+Ты можешь **расширить** его возможности, добавив новые комплектующие.
+Но ты не будешь **изменять** саму материнскую плату, чтобы это сделать.
+
+Так же и с кодом: мы должны иметь возможность добавлять новую функциональность, не переписывая уже существующий код.
+
+---
+
+## Плохой пример
+
+Представь, что у нас есть сервис уведомлений:
+
+```typescript
+export class NotificationService {
+  public sendMessage(type: string, message: string): void {
+    if (type === "email") {
+      return console.log(`Sending email: ${message}`);
+    }
+
+    if (type === "sms") {
+      return console.log(`Sending SMS: ${message}`);
+    }
+
+    if (type === "push") {
+      return console.log(`Sending Push: ${message}`);
+    }
+
+    throw new Error("Unvalid notification type");
+  }
+}
+```
+
+Вроде работает. Но что, если завтра нужно добавить Telegram?
+Придётся лезть внутрь класса и дописывать ещё один `if`. А послезавтра — WhatsApp. И так до бесконечности.
+
+Каждый раз мы **изменяем** класс, а не **расширяем** его. Это нарушает OCP.
+
+---
+
+## Хороший пример
+
+Сделаем так, чтобы можно было добавлять новые способы отправки, не трогая существующий код.
+
+```typescript
+export type NotificationSender = {
+  execute(message: string): void;
+};
+
+export class EmailSender implements NotificationSender {
+  public execute(message: string): void {
+    return console.log(`Sending email: ${message}`);
+  }
+}
+
+export class SmsSender implements NotificationSender {
+  public execute(message: string): void {
+    return console.log(`Sending SMS: ${message}`);
+  }
+}
+
+export class PushSender implements NotificationSender {
+  public execute(message: string): void {
+    return console.log(`Sending Push: ${message}`);
+  }
+}
+
+export class NotificationService {
+  public constructor(private readonly sender: NotificationSender) {}
+
+  public send(message: string): void {
+    this.sender.execute(message);
+  }
+}
+
+const emailSender = new EmailSender();
+const email = new NotificationService(emailSender);
+email.send("Hello via email!");
+
+const smsSender = new SmsSender();
+const sms = new NotificationService(smsSender);
+sms.send("Hello via SMS!");
+```
+
+Теперь, чтобы добавить Telegram:
+
+```typescript
+export class TelegramSender implements NotificationSender {
+  public execute(message: string): void {
+    return console.log(`Sending Telegram: ${message}`);
+  }
+}
+
+const telegramSender = new TelegramSender();
+const telegram = new NotificationService(telegramSender);
+telegram.send("Hello via Telegram!");
+```
+
+**Мы не изменили ни строчки в `NotificationService` или существующих отправителях.** Мы просто добавили новый класс.
+
+---
+
+## Ещё один пример — с функциями
+
+OCP работает не только с классами. Посмотри на эту функцию:
+
+```typescript
+const calculateDiscount = (type: string, price: number): number => {
+  if (type === "regular") {
+    return price * 0.9;
+  }
+
+  if (type === "vip") {
+    return price * 0.8;
+  }
+
+  if (type === "employee") {
+    return price * 0.7;
+  }
+
+  return price;
+};
+```
+
+Каждый новый тип скидки требует изменения функции.
+
+А вот хороший вариант:
+
+```typescript
+type DiscountStrategy = {
+  execute(price: number): number;
+};
+
+export class RegularDiscount implements DiscountStrategy {
+  public execute(price: number): number {
+    return price * 0.9;
+  }
+}
+
+export class VipDiscount implements DiscountStrategy {
+  public execute(price: number): number {
+    return price * 0.8;
+  }
+}
+
+export class EmployeeDiscount implements DiscountStrategy {
+  public execute(price: number): number {
+    return price * 0.7;
+  }
+}
+
+export class DiscountCalculator {
+  public constructor(private readonly strategy: DiscountStrategy) {}
+
+  public execute(price: number): number {
+    return this.strategy.execute(price);
+  }
+}
+
+// или с функцией:
+const calculateDiscount = (
+  strategy: DiscountStrategy,
+  price: number,
+): number => {
+  return strategy.apply(price);
+}; // однако этот вариант мне лично не нравится
+```
+
+Теперь добавить новый тип скидки — просто создать новый класс, реализующий `DiscountStrategy`. Функция `calculateDiscount` остаётся нетронутой.
+
+---
+
+## Как понять, что ты нарушаешь OCP?
+
+Вот несколько признаков:
+
+1. **Цепочки `if/else` или `switch`** по типу объекта или строки — почти всегда нарушение.
+2. **Ты лезешь в уже написанный код**, чтобы добавить новую фичу.
+3. **Ты боишься что-то поменять**, потому что сломается что-то ещё.
+
+Если ты видишь такое — пора задуматься о рефакторинге.
+
+---
+
+## Итог
+
+**OCP** учит нас проектировать код так, чтобы он был гибким.
+Мы строим систему из "кирпичиков", которые можно легко заменять и добавлять новые, не перестраивая всё здание.
+
+Ключевой инструмент — **абстракции**. Вместо того чтобы зависеть от конкретных реализаций, мы зависим от абстракций.
+
+На практике это значит:
+
+- Используй полиморфизм вместо условных операторов.
+- Внедряй зависимости через конструктор.
+- Выноси логику в отдельные классы/функции.

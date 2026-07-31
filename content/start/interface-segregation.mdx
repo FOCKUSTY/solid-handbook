@@ -1,0 +1,184 @@
+# Принцип разделения интерфейсов
+
+_Далее: ISP (interface segregation principle)_
+
+**Принцип** звучит так:
+
+> Не нужно заставлять клиента реализовывать интерфейс, который он не использует.
+
+Если проще: **толстые интерфейсы — зло**. Лучше много маленьких, чем один большой.
+
+---
+
+## Пример из жизни
+
+Представь, что ты работаешь в офисе.
+В холле стоит огромный многофункциональный станок: печатает, сканирует, копирует, отправляет факсы, делает кофе и играет музыку.
+
+Тебе нужно только распечатать документ.
+Но чтобы включить станок, ты вынужден разбираться во всех его функциях,
+потому что кнопка "Печать" спрятана где-то между "Капучино" и "Воспроизвести". Это неудобно.
+
+Намного лучше было бы иметь отдельный принтер с одной кнопкой "Печать".
+
+Так же и с интерфейсами.
+
+## Плохой пример
+
+Есть "толстый" интерфейс `Payments`:
+
+```typescript
+export type Payments = {
+  payWebMoney(amount: number): void;
+  payCreditCard(amount: number): void;
+  payPhoneNumber(amount: number): void;
+};
+```
+
+Класс `TerminalPaymentService` должен поддерживать WebMoney и карту, но **не должен** оплачивать по номеру телефона:
+
+```typescript
+export class TerminalPaymentService implements Payments {
+  public payWebMoney(amount: number): void {
+    return console.log(`Paid ${amount} via WebMoney`);
+  }
+
+  public payCreditCard(amount: number): void {
+    return console.log(`Paid ${amount} via credit card`);
+  }
+
+  public payPhoneNumber(amount: number): void {
+    throw new Error("Terminal does not support phone payments");
+  }
+}
+```
+
+Класс вынужден реализовывать ненужный метод.
+Если в другом месте кода кто-то вызовет `payPhoneNumber` у `TerminalPaymentService`, программа упадёт. Это нарушение ISP.
+
+## Хороший пример
+
+Разделим интерфейсы по назначению:
+
+```typescript
+export type WebMoneyPayment = {
+  payWebMoney(amount: number): void;
+};
+
+export type CreditCardPayment = {
+  payCreditCard(amount: number): void;
+};
+
+export type PhonePayment = {
+  payPhoneNumber(amount: number): void;
+};
+```
+
+Теперь каждый класс реализует только то, что ему нужно:
+
+```typescript
+export class TerminalPaymentService
+  implements WebMoneyPayment, CreditCardPayment
+{
+  public payWebMoney(amount: number): void {
+    return console.log(`Paid ${amount} via WebMoney`);
+  }
+
+  public payCreditCard(amount: number): void {
+    return console.log(`Paid ${amount} via credit card`);
+  }
+}
+
+export class OnlinePaymentService implements CreditCardPayment, PhonePayment {
+  public payCreditCard(amount: number): void {
+    return console.log(`Paid ${amount} via credit card`);
+  }
+
+  public payPhoneNumber(amount: number): void {
+    return console.log(`Paid ${amount} via phone number`);
+  }
+}
+```
+
+Теперь:
+
+- `TerminalPaymentService` не знает о телефонных платежах — их просто нет в интерфейсе.
+- `OnlinePaymentService` не знает о WebMoney.
+- Каждый класс реализует ровно то, что должен.
+
+## Ещё один пример — с функциями
+
+Тот же принцип работает и на уровне функций.
+
+**Плохо:**
+
+```typescript
+type User = {
+  id: number;
+  name: string;
+  email: string;
+  passwordHash: string;
+  lastLogin: Date;
+  isActive: boolean;
+};
+
+const getUserProfile = (userId: number): User => {
+  /* ... */
+}; // Возвращает все поля, включая passwordHash
+```
+
+Функция `getUserProfile` возвращает пароль, хотя он не нужен для отображения профиля.
+Если кто-то случайно выведет его в лог — это утечка данных.
+
+**Хорошо:**
+
+```typescript
+type PublicUserProfile = {
+  id: number;
+  name: string;
+  email: string;
+  isActive: boolean;
+};
+
+type PrivateUserData = {
+  passwordHash: string;
+  lastLogin: Date;
+};
+
+const getUserProfile = (userId: number): PublicUserProfile => {
+  /* ... */
+}; // Возвращает только безопасные данные
+```
+
+Теперь клиент получает ровно то, что ему нужно, и не больше. Меньше данных — меньше рисков.
+
+---
+
+## Как понять, что ты нарушаешь ISP?
+
+Вот несколько признаков:
+
+1. **Класс реализует методы, которые бросают `UnsupportedOperationException` или просто пустые.**
+2. **Ты постоянно используешь `instanceof` или проверки типа** — значит, интерфейс слишком широкий.
+3. **При изменении интерфейса приходится править много классов**, хотя они используют только часть методов.
+
+## Итог
+
+**ISP** — это про интерфейсы. Он говорит нам:
+
+- Интерфейсы должны быть узкоспециализированными.
+- Клиент не должен зависеть от того, что ему не нужно.
+- Лучше много маленьких интерфейсов, чем один большой.
+
+На практике это значит:
+
+- Дели большие интерфейсы на несколько маленьких по смыслу.
+- Не добавляй в интерфейс методы, которые нужны только одной реализации.
+- Если интерфейс становится "толстым" — это сигнал, что пора рефакторить.
+
+---
+
+## Связь с другими принципами
+
+- **SRP** говорит об ответственности классов. **ISP** говорит об ответственности интерфейсов.
+- **LSP** и **ISP** вместе помогают создавать гибкую иерархию классов.

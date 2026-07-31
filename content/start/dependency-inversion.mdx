@@ -1,0 +1,239 @@
+# Принцип инверсии зависимостей
+
+_Далее: DIP (dependency inversion principle)_
+
+**Принцип** звучит так:
+
+> Зависимости должны строиться относительно абстракций, а не деталей.
+
+Если проще: **модули верхнего уровня не должны зависеть от модулей нижнего уровня. Оба должны зависеть от абстракций.**
+
+Абстракции не должны зависеть от деталей. Детали должны зависеть от абстракций.
+
+---
+
+## Пример из жизни
+
+Представь, что у тебя есть настольная лампа.
+Она подключается к розетке через вилку.
+
+- Лампа (модуль верхнего уровня) не знает, откуда берётся электричество — из розетки, генератора или солнечной батареи.
+- Розетка (модуль нижнего уровня) не знает, что именно к ней подключили — лампу, чайник или компьютер.
+
+Они оба зависят от **стандарта** — вилки и розетки.
+Это и есть абстракция. Ты можешь заменить лампу на чайник, и розетка не заметит разницы.
+
+Так же и в коде.
+
+## Плохой пример
+
+Допустим, у нас есть класс `MySqlDatabase`, который работает с базой данных:
+
+```typescript
+export class MySqlDatabase {
+  public connect(): void {
+    return console.log("Connected to MySQL");
+  }
+
+  public query(sql: string, parameters: any): void {
+    return console.log(`Executing query: ${sql}`);
+  }
+}
+```
+
+И класс `UserService`, который использует эту базу данных напрямую:
+
+```typescript
+export class UserService {
+  private readonly _database: MySQLDatabase;
+
+  public constructor() {
+    this._database = new MySqlDatabase();
+  }
+
+  public getUser(id: number): void {
+    this._database.connect();
+    this._database.query("SELECT * FROM users WHERE id = {id}", { id });
+  }
+}
+```
+
+Что здесь не так?
+
+- `UserService` жёстко привязан к `MySqlDatabase`.
+- Если завтра решим перейти на PostgreSQL — придётся переписывать `UserService`.
+- Невозможно протестировать `UserService` без реальной базы данных.
+
+`UserService` зависит от конкретной реализации, а не от абстракции. Это нарушение DIP.
+
+## Хороший пример
+
+Сначала создаём абстракцию:
+
+```typescript
+export type Database = {
+  connect(): void;
+  query(sql: string, parameters: any): void;
+};
+```
+
+Теперь реализуем конкретные базы данных:
+
+```typescript
+export class MySqlDatabase implements Database {
+  public connect(): void {
+    return console.log("Connected to MySQL");
+  }
+
+  public query(sql: string): void {
+    return console.log(`MySQL: ${sql}`);
+  }
+}
+
+export class PostgresDatabase implements Database {
+  public connect(): void {
+    return console.log("Connected to PostgreSQL");
+  }
+
+  public query(sql: string): void {
+    return console.log(`PostgreSQL: ${sql}`);
+  }
+}
+```
+
+И теперь `UserService` зависит от абстракции, а не от конкретики:
+
+```typescript
+export class UserService {
+  public constructor(private readonly database: Database) {}
+
+  public getUser(id: number): void {
+    this.database.connect();
+    this.database.query("SELECT * FROM users WHERE id = {id}", { id });
+  }
+}
+```
+
+Теперь:
+
+- `UserService` не знает, какая база данных используется.
+- Чтобы перейти на PostgreSQL, достаточно передать другой объект.
+- Можно легко подменить базу данных в тестах.
+
+## Ещё один пример — с логированием
+
+**Плохо:**
+
+```typescript
+export class FileLogger {
+  public log(message: string): void {
+    return console.log(`Writing to file: ${message}`);
+  }
+}
+
+export class OrderService {
+  private readonly _logger: FileLogger;
+
+  public constructor() {
+    this._logger = new FileLogger();
+  }
+
+  public createOrder(data: any): void {
+    this._logger.log("Order created");
+  }
+}
+```
+
+`OrderService` жёстко привязан к `FileLogger`. Если нужно логировать в базу данных или в консоль — придётся менять `OrderService`.
+
+**Хорошо:**
+
+```typescript
+export type Logger = {
+  log(message: string): void;
+};
+
+export class FileLogger implements Logger {
+  public log(message: string): void {
+    return console.log(`Writing to file: ${message}`);
+  }
+}
+
+export class ConsoleLogger implements Logger {
+  public log(message: string): void {
+    return console.log(`Console: ${message}`);
+  }
+}
+
+export class OrderService {
+  public constructor(private readonly logger: Logger) {}
+
+  public createOrder(data: any): void {
+    this.logger.log("Order created");
+  }
+}
+```
+
+Теперь:
+
+- `OrderService` работает с любым логгером.
+- Чтобы изменить способ логирования — просто подставляем другую реализацию.
+
+## Dependency Injection — как это работает
+
+На практике DIP реализуется через **Dependency Injection** (внедрение зависимостей).
+
+Вместо того чтобы создавать зависимости внутри класса, мы передаём их через конструктор (или сеттер).
+
+```typescript
+export class BadService {
+  private readonly _database: Database;
+
+  public constructor() {
+    this._database = new MySqlDatabase();
+  }
+}
+
+export class GoodService {
+  public constructor(private readonly database: Database) {}
+}
+```
+
+Это даёт:
+
+- Гибкость — можно подменять реализации.
+- Тестируемость — легко подставить мок.
+- Чистоту кода — класс не заботится о создании зависимостей.
+
+---
+
+## Как понять, что ты нарушаешь DIP?
+
+Вот несколько признаков:
+
+1. **Ты используешь `new` внутри класса для создания зависимостей** — почти всегда нарушение.
+2. **Твои классы импортируют конкретные реализации, а не абстракции** — плохой знак.
+3. **Чтобы заменить одну деталь реализации, нужно менять много классов верхнего уровня** — система жёсткая.
+
+---
+
+## Итог
+
+**DIP** — это про архитектуру зависимостей. Он говорит нам:
+
+- Зависимости должны идти от конкретного к абстрактному.
+- Модули верхнего уровня не должны зависеть от модулей нижнего уровня.
+- Вместо этого оба должны зависеть от абстракций.
+
+На практике это значит:
+
+- Используй интерфейсы или абстрактные классы для описания зависимостей.
+- Внедряй зависимости через конструктор (Dependency Injection).
+- Не создавай зависимости внутри класса с помощью `new`.
+
+---
+
+## Связь с другими принципами
+
+- **OCP** и **DIP** работают вместе: DIP позволяет создавать абстракции, а OCP — расширять систему через эти абстракции.
+- **SRP** часто идёт рука об руку с DIP: когда у класса одна ответственность, ему легче передавать зависимости через конструктор.
