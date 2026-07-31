@@ -1,36 +1,105 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Карманная книга по SOLID
 
-## Getting Started
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
-First, run the development server:
+**Карманная книга по SOLID** — это интерактивное руководство по пяти принципам объектно-ориентированного проектирования, написанное с использованием [Nextra](https://nextra.site) на базе [Next.js](https://nextjs.org). Книга предназначена для программистов, которые хотят разобраться в SOLID на понятных примерах.
+
+## 📖 Содержание
+
+- **Вступление** — что такое SOLID и зачем он нужен.
+- **Примечание** — важные соглашения и ограничения.
+- **Начало**
+  - Принцип единой ответственности (SRP)
+  - Полиморфизм
+  - Принцип открытости‑закрытости (OCP)
+  - Принцип подстановки Лисков (LSP)
+  - Принцип разделения интерфейсов (ISP)
+  - Принцип инверсии зависимостей (DIP)
+  - Заключение
+
+Каждая глава содержит живые примеры кода на TypeScript, объяснения «на пальцах» и практические советы.
+
+## 🚀 Технологии
+
+- [Next.js](https://nextjs.org) 16.2.6
+- [Nextra](https://nextra.site) 4.3.0 (документация из MDX)
+- [TypeScript](https://www.typescriptlang.org)
+- [Tailwind CSS](https://tailwindcss.com) 4.2.4
+- [React](https://react.dev) 19.1.0
+
+## 📦 Установка и запуск
+
+Для локальной работы с книгой необходимо установить [Node.js](https://nodejs.org) (рекомендуется версия 18+) и менеджер пакетов (pnpm, npm, yarn).
+
+1. Клонируйте репозиторий:
+
+   ```bash
+   git clone https://github.com/FOCKUSTY/solid-handbook.git
+   cd solid-handbook
+   ```
+
+2. Установите зависимости (рекомендуется pnpm, но можно использовать npm или yarn):
+
+   ```bash
+   pnpm install
+   ```
+
+3. Запустите сервер разработки:
+
+   ```bash
+   pnpm dev
+   ```
+
+4. Откройте [http://localhost:3000](http://localhost:3000) в браузере.
+
+Сборка для продакшена:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm build
+pnpm start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 📁 Структура проекта
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```
+.
+├── app/                     # Next.js App Router
+│   ├── layout.tsx           # корневой шаблон (Nextra Layout)
+│   ├── globals.css          # глобальные стили (Tailwind + Nextra)
+│   └── [[...path]]/page.tsx # динамические страницы MDX
+├── content/                 # всё содержимое книги
+│   ├── index.mdx            # вступление
+│   ├── note.mdx             # примечания
+│   ├── _meta.ts             # настройки навигации для корня
+│   └── start/               # главы по принципам
+│       ├── single-responsibility.mdx
+│       ├── polymorphism.mdx
+│       ├── open-closed.mdx
+│       ├── liskov-substitution.mdx
+│       ├── interface-segregation.mdx
+│       ├── dependency-inversion.mdx
+│       ├── conclusion.mdx
+│       └── _meta.ts         # порядок глав
+├── public/                  # статические файлы (иконки, лого)
+├── mdx-components.ts        # кастомные компоненты для MDX
+├── next.config.ts           # конфигурация Next.js (подключение Nextra)
+├── tsconfig.json            # настройки TypeScript
+├── package.json
+├── postcss.config.mjs
+├── eslint.config.mjs
+└── LICENSE
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 🤝 Вклад
 
-## Learn More
+Книга открыта для улучшений и дополнений. Если вы нашли ошибку, хотите предложить новый пример или просто улучшить формулировку — создавайте Issues или Pull Requests.
 
-To learn more about Next.js, take a look at the following resources:
+## 📄 Лицензия
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Проект распространяется под лицензией [MIT](./LICENSE).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## ✍️ Автор
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+**[FOCKUSTY](https://fockusty.vercel.app)**  
+Telegram: [@fockustyx](https://t.me/fockustyx)  
+GitHub: [FOCKUSTY](https://github.com/FOCKUSTY)
