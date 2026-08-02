@@ -19,9 +19,13 @@
 
 3. Использование `tryCatchThrow`, чтобы избавиться от больших повторяющихся `try-catch`-блоков.
 
-> `AuthGuard` следует SRP не потому, что он маленький,
-> а потому что его единственная ответственность — это управление потоком аутентификации.
-> (решить: пропустить запрос или нет). Всё остальное — это детали, которые он делегирует.
+> `AuthGuard` демонстрирует стремление к SRP,
+> потому что делегирует часть работы (валидацию, криптографию, парсинг slug) профильным сервисам.
+> Однако он всё ещё нарушает принцип, смешивая аутентификацию и авторизацию,
+> а также трансформацию данных.
+> Его главная проблема — не размер,
+> а размытие границ ответственности.
+> Давайте разберём, что именно пошло не так и как это исправить.
 
 ## Что плохо
 
@@ -47,11 +51,6 @@
 а в **смешении уровней абстракции** и **нарушении Open/Closed Principle**.
 Если мы выделим `OnlyMeGuard` и `MetadataHandlerChain`, то `AuthGuard` станет эталонным примером SRP:
 его единственная задача — скомпоновать результаты проверок и принять решение.
-
-> **Запомните:** SRP — это не про размер класса или количество методов.
-> Это про **направление изменений**.
-> Если изменение требований к аутентификации заставляет менять код парсинга slug — значит, ответственность размазана.
-> Если же вы можете добавить новый тип авторизации, не трогая `AuthGuard`, — вы на верном пути.
 
 ## Улучшенный код
 
@@ -205,6 +204,86 @@ export class PostsController {
 }
 ```
 
+### Альтернативный подход: цепочка обработчиков метаданных
+
+Вместо того чтобы проверять все метаданные внутри одного метода `validateMetadata` через условия, можно применить паттерн **«Цепочка обязанностей»**. Тогда каждый тип метаданных получает свой обработчик, и новые типы добавляются без изменения существующего кода.
+
+```typescript
+export type MetadataHandlerType = {
+  execute(context: ExecutionContext): Promise<boolean>;
+};
+
+@Injectable()
+export class PublicHandler implements MetadataHandlerType {
+  public constructor(private readonly reflector: Reflector) {}
+
+  public async execute(context: ExecutionContext): Promise<boolean> {
+    const isPublic = this.reflector.get<boolean>(
+      Metadata.isPublic,
+      context.getHandler(),
+    );
+    return !isPublic;
+  }
+}
+
+@Injectable()
+export class OnlyMeHandler implements MetadataHandlerType {
+  public constructor(
+    private readonly reflector: Reflector,
+    private readonly serverUserService: ServerUserService,
+    private readonly service: OnlyMeGuardService,
+  ) {}
+
+  public async execute(context: ExecutionContext): Promise<boolean> {
+    const onlyMeMetadata = this.reflector.get<OnlyMeMetadata>(
+      Metadata.isOnlyMe,
+      context.getHandler(),
+    );
+    if (!onlyMeMetadata) {
+      return true;
+    }
+
+    const request = context.switchToHttp().getRequest<Request>();
+    const user = this.serverUserService.getByRequest(request);
+    if (!user) {
+      throw new ForbiddenException("User not authenticated");
+    }
+
+    const validated = await this.service.execute(
+      user,
+      onlyMeMetadata,
+      request.params,
+    );
+    if (!validated) {
+      throw new ForbiddenException("You are not the owner of this resource");
+    }
+
+    return true;
+  }
+}
+
+@Injectable()
+export class MetadataHandler {
+  public constructor(private readonly reflector: Reflector) {}
+
+  public async execute(
+    handlers: MetadataHandlerType[],
+    context: ExecutionContext,
+  ) {
+    for (const handler of handlers) {
+      const result = await handler.execute(context);
+      if (!result) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+}
+```
+
+Этот подход **открыт для расширения** (новый тип метаданных = новый класс) и **закрыт для изменения** (существующие обработчики не трогаем).
+
 ## Что мы сделали и зачем
 
 Мы взяли `AuthGuard`, который успел обрасти ответственностью, и аккуратно разобрали его на части.
@@ -257,3 +336,12 @@ export class PostsController {
 А главное — мы убрали **смешение уровней абстракции**.
 Теперь `AuthGuard` не знает, как парсить slug, а `OnlyMeGuard` не знает, как работать с токенами.
 Каждый занимается своим делом — и делает это хорошо.
+
+> **Запомните:** SRP — это не про размер класса или количество методов.
+> Это про **направление изменений**.
+> Если изменение требований к аутентификации заставляет менять код парсинга slug — значит,
+> ответственность размазана.
+> Если же вы можете добавить новый тип авторизации,
+> не трогая `AuthGuard`, — вы на верном пути.
+> Главное — разделять аутентификацию и авторизацию,
+> делегировать детали, и тогда класс будет иметь ровно одну причину для изменения.

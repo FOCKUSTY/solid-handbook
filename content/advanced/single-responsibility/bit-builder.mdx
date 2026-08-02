@@ -1,0 +1,291 @@
+# Пример с BitBuilder
+
+_генератор битовых конфигураций_
+
+Возьмём пример из [bit-field](https://github.com/FOCKUSTY/bit-field/blob/d4921c08bbd338d922a6358adacbddef0d790363/src/bit-builder.ts).
+
+`BitBuilder` — это класс, который генерирует битовые значения для списка имён,
+автоматически вычисляя смещения.
+Он также предоставляет статические методы для работы с конфигурациями категорий и свёртки в битовые маски.
+
+На первый взгляд — удобный инструмент с несколькими режимами работы.
+Но давай копнём глубже.
+
+## Что хорошо
+
+### Гибкая генерация с автоматическим смещением
+
+Основной метод `execute` позволяет передавать начальное смещение,
+исключать определённые имена и даже задавать `include`-фильтр:
+
+```typescript
+const builder = new BitBuilder(["READ", "WRITE", "DELETE"]);
+builder.execute({ offset: 5n, exclude: ["DELETE"] });
+// { READ: 1n<<5n, WRITE: 1n<<6n, DELETE: 0n }
+```
+
+Это удобно и покрывает множество сценариев.
+
+### Продвинутая работа с категориями
+
+Метод `fromConfig` позволяет задать несколько категорий с правилами `include`/`exclude`,
+причём следующая категория автоматически получает смещение от предыдущей:
+
+```typescript
+const rights = {
+  user: { include: ["VIEW", "EDIT"], exclude: ["DELETE"] },
+  admin: { include: ["VIEW", "EDIT", "DELETE"], exclude: [] },
+};
+const bits = BitBuilder.fromConfig(rights);
+```
+
+Это мощная абстракция для систем с ролями и правами.
+
+### Утилиты для свёртки
+
+Статический метод `resolve` позволяет превращать объект именованных битов в одно число (`bigint`).
+Это упрощает использование в реальном коде.
+
+## Что плохо
+
+### Три обязанности в одном классе
+
+`BitBuilder` выполняет три разные задачи:
+
+1. **Генерация для одного списка** — экземплярный метод `execute` и вспомогательные `computeBit`, `resolveOffset`.
+2. **Генерация конфигурации для нескольких категорий** — статический метод `fromConfig`.
+3. **Вспомогательные утилиты** — статические методы `resolve` и `fromData`, которые не относятся напрямую к генерации смещений.
+
+Это нарушение **SRP**:
+
+- Если изменится логика автоматического смещения (например, нужно резервировать биты для служебных целей) — придётся править и `execute`, и `fromConfig`.
+- Если добавится новый формат конфигурации (например, YAML вместо объекта) — править придётся `fromConfig`, хотя это не его основная задача.
+- Статический `resolve` мог бы быть отдельной функцией, а не частью класса-генератора.
+
+### Статические методы «прилипли» к классу
+
+`BitBuilder` превратился в «швейцарский нож»:
+в нём собраны все утилиты, связанные с битовыми масками.
+Это нарушает принцип **единой ответственности** на уровне пакета:
+лучше иметь отдельный модуль `utils` для свёртки,
+а `BitBuilder` занимался только построением.
+
+### Смешение уровней абстракции
+
+`fromData` возвращает объект с полями `all`, `include`, `exclude`, `bitBuilder`, `available`, `default`.
+Это слишком много для одного метода — он выдаёт не только биты,
+но и сам экземпляр билдера,
+что нарушает инкапсуляцию и размывает ответственность.
+
+```typescript
+const data = BitBuilder.fromData({
+  include: ["READ", "WRITE"],
+  exclude: ["DELETE"],
+  offset: 5n,
+});
+// data.bitBuilder — зачем он здесь?
+```
+
+### Громоздкая типизация из-за универсальности
+
+Класс перегружен дженериками и сложными типами (`StaticBuilderBitData`, `BuilderBitData`).
+Это делает код менее читаемым, хотя и обеспечивает типобезопасность.
+
+---
+
+## Улучшенный код
+
+Разделим обязанности на три отдельных модуля.
+
+### 1. BitBuilder (только генерация для одного списка)
+
+Оставляем только экземплярный метод и его помощники.
+
+```typescript
+export class BitBuilder<T extends string> {
+  constructor(private readonly bits: T[]) {}
+
+  public execute(data?: Partial<BuilderBitData<T>>): Record<T, bigint> {
+    // ... только генерация для одного списка
+  }
+
+  private computeBit(/* ... */) {
+    /* ... */
+  }
+  private resolveOffset(/* ... */) {
+    /* ... */
+  }
+}
+```
+
+### 2. BitConfigBuilder (работа с категориями)
+
+Выносим `fromConfig` в отдельный класс. Для свёртки используем отдельную функцию `resolveBits`.
+
+```typescript
+export class BitConfigBuilder {
+  public static fromConfig<Config extends DefaultConfig>(
+    config: Config,
+  ): BitConfig<Config> {
+    // ... только построение
+  }
+}
+
+export function resolveConfig<Config extends DefaultConfig>(
+  bitConfig: BitConfig<Config>,
+): BitPermissions<Config> {
+  const keys = Object.keys(bitConfig.raw) as (keyof Config)[];
+  const bitPermissions = {
+    available: {},
+    default: {},
+  } as BitPermissions<Config>;
+
+  for (const key of keys) {
+    bitPermissions.available[key] = resolveBits(bitConfig.available[key]);
+    bitPermissions.default[key] = resolveBits(bitConfig.default[key]);
+  }
+
+  return bitPermissions;
+}
+```
+
+### 3. Утилиты для работы с битами
+
+Статический метод `resolve` становится отдельной функцией `resolveBits` в модуле `bit-utils`.
+А `fromData` возвращает только биты, без экземпляра билдера.
+
+```typescript
+// bit-utils.ts
+export function resolveBits(bits: BigIntRecord): bigint {
+  return BitFieldOperations.summarize(...Object.values(bits));
+}
+
+export function fromData<Include extends string[], Exclude extends string[]>(
+  data: StaticBuilderBitData<Include, Exclude>,
+) {
+  // ... логика, которая раньше была в BitBuilder.fromData
+  // возвращает только биты, без экземпляра билдера
+}
+```
+
+---
+
+## Что мы сделали и зачем
+
+Мы разделили `BitBuilder` на три независимые части:
+
+- **BitBuilder** — генерация битов для одного списка.
+- **BitConfigBuilder** — построение конфигураций для категорий и их свёртка (использует `resolveBits`).
+- **bit-utils** — общие утилиты для работы с битовыми масками.
+
+Теперь:
+
+- Если изменится логика смещения — правим только `BitBuilder`.
+- Если изменится формат конфигурации категорий — правим только `BitConfigBuilder`.
+- Если понадобится новая утилита — добавляем в `bit-utils`, не трогая генерацию.
+
+Каждый модуль имеет **ровно одну причину для изменения**.
+
+### Как могли бы выглядеть новые модули
+
+**BitConfigBuilder** (отдельный класс для работы с категориями):
+
+```typescript
+export class BitConfigBuilder {
+  public static fromConfig<Config extends DefaultConfig>(
+    config: Config,
+  ): BitConfig<Config> {
+    let offset: bigint = ZERO_BIT;
+
+    const keys = Object.keys(config) as (keyof Config)[];
+    const bitConfig = {
+      available: {},
+      default: {},
+      raw: {},
+    } as BitConfig<Config>;
+
+    for (const key of keys) {
+      const { include, exclude } = config[key];
+
+      const isIntersection = include.some((permission) =>
+        exclude.includes(permission),
+      );
+      if (isIntersection) {
+        throw new Error("Intersection was found.");
+      }
+
+      const all = [...include, ...exclude];
+      const builder = new BitBuilder(all);
+
+      const availableBits = builder.execute({ offset });
+      const defaultBits = builder.execute({ offset, exclude });
+
+      bitConfig.available[key] = availableBits;
+      bitConfig.default[key] = defaultBits;
+      bitConfig.raw[key] = all;
+
+      const maxBit = BitFieldOperations.max(
+        ...(Object.values(availableBits) as bigint[]),
+      );
+      if (maxBit !== ZERO_BIT) {
+        offset = BitFieldOperations.logarithm2(maxBit) + ONE_BIT;
+      }
+    }
+
+    return bitConfig;
+  }
+}
+```
+
+**bit-utils.ts** (отдельный модуль для утилит):
+
+```typescript
+export function resolveBits(bits: BigIntRecord): bigint {
+  return BitFieldOperations.summarize(...Object.values(bits));
+}
+
+export function fromData<Include extends string[], Exclude extends string[]>(
+  data: StaticBuilderBitData<Include, Exclude>,
+) {
+  const all = [...data.include, ...data.exclude];
+  const exclude = data.exclude;
+  const include = data.include;
+
+  const bitBuilder = new BitBuilder(all);
+  const availableBits = bitBuilder.execute({ offset: data.offset });
+  const defaultBits = bitBuilder.execute({
+    offset: data.offset,
+    exclude: exclude,
+  });
+
+  return {
+    all,
+    include,
+    exclude,
+    available: availableBits,
+    default: defaultBits,
+  } as const;
+}
+```
+
+Теперь `BitBuilder` занимается **только** генерацией для одного списка, а всё остальное вынесено.
+
+## Что в итоге
+
+`BitBuilder` в текущей реализации — это пример **умеренного нарушения SRP**.
+Он делает несколько вещей,
+и хотя они связаны тематически, их лучше разделить. Это позволит:
+
+- Упростить тестирование — каждый модуль тестируется отдельно.
+- Сделать код более понятным — каждый файл отвечает за свою зону.
+- Облегчить поддержку — изменения в одной части не затронут другие.
+
+> **Запомните:** Класс не должен быть «швейцарским ножом».
+> Если вы видите, что класс содержит
+> и генерацию, и конфигурацию, и утилиты — это сигнал,
+> что пора выделять отдельные модули.
+> Даже если они тематически связаны, разделение по ответственности делает код чище.
+
+---
+
+_Исходный код доступен в [репозитории bit-field](https://github.com/FOCKUSTY/bit-field/blob/d4921c08bbd338d922a6358adacbddef0d790363)._

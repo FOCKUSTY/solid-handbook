@@ -1,0 +1,215 @@
+# Пример с Fenvironment
+
+Возьмём пример из [CsTestShop](https://github.com/FOCKUSTY/CsTestShop/blob/cc42c6f594b410cb0f7d46b51f0dd7f04d2649df/Services/Environment.cs).
+
+На первый взгляд — удобный класс, который собирает все переменные окружения в одном месте,
+проверяет их наличие и предоставляет статический доступ.
+Но давай копнём глубже.
+
+## Что хорошо
+
+### Централизованное управление переменными
+
+Все переменные окружения собраны в одном классе, это упрощает поиск и изменение.
+
+```csharp
+public static string DATABASE_HOST() => Env.GetString("DATABASE_HOST");
+public static string DATABASE_USER() => Env.GetString("DATABASE_USER");
+// ... и так далее
+```
+
+### Список ожидаемых переменных
+
+Класс содержит статический список `VARIABLES`, который используется для валидации — удобно, когда нужно быстро проверить, все ли переменные определены.
+
+```csharp
+public static readonly List<string> VARIABLES = new()
+{
+  "KAFKA_BOOTSTRAP_SERVERS",
+  "ORDER_CREATED_GROUP",
+  // ...
+};
+```
+
+### Единая точка загрузки
+
+Метод `Execute()` загружает `.env` и запускает валидацию — это даёт уверенность, что приложение не стартанёт без нужных настроек.
+
+## Что плохо
+
+### Три ответственности в одном классе
+
+Класс `Fenvironment` делает **три разных дела**:
+
+1. Загружает файл `.env`.
+2. Проверяет наличие всех переменных.
+3. Предоставляет значения переменных через статические методы.
+
+Это прямое нарушение **SRP** — у класса появляется три причины для изменения:
+
+- Изменится способ загрузки (например, вместо `.env` будем читать из AWS Secrets Manager) — правим `Fenvironment`.
+- Изменится список обязательных переменных — опять правим `Fenvironment`.
+- Изменится способ доступа к значениям (например, захотим кешировать) — снова правим `Fenvironment`.
+
+### Статические методы — враг тестируемости
+
+Все методы получения значений — статические и жёстко привязаны к библиотеке `DotNetEnv`:
+
+```csharp
+public static string DATABASE_HOST() => Env.GetString("DATABASE_HOST");
+```
+
+Это делает **невозможным** подмену значений в тестах. Нельзя передать мок или фейковые данные — только реальный `.env` файл.
+
+### Дублирование и ручной список
+
+Для каждой переменной написан отдельный статический метод,
+а список `VARIABLES` дублирует эти имена.
+При добавлении новой переменной нужно править **два места**: и метод, и список.
+Это источник ошибок.
+
+### Смесь загрузки и валидации
+
+Метод `Execute()` одновременно загружает файл и запускает проверку.
+Если мы захотим переиспользовать логику загрузки без валидации (например, в консольной утилите) — не получится.
+
+---
+
+## Улучшенный код
+
+Разделим обязанности на три отдельных класса (или используем стандартный `IConfiguration`).
+
+### 1. Загрузчик переменных
+
+Вынесем загрузку `.env` в отдельный класс, который просто наполняет `IConfiguration`.
+
+```csharp
+public static class EnvironmentLoader
+{
+  public static IConfiguration LoadEnvironment()
+  {
+      Env.Load("./.env");
+      var envVars = new Dictionary<string, string>
+      {
+          ["DATABASE_HOST"] = Env.GetString("DATABASE_HOST"),
+          ["DATABASE_USER"] = Env.GetString("DATABASE_USER"),
+          // ... все переменные, которые нужны
+      };
+      var builder = new ConfigurationBuilder()
+          .AddInMemoryCollection(envVars);
+      return builder.Build();
+  }
+}
+```
+
+### 2. Валидатор обязательных переменных
+
+Отдельный сервис, который проверяет наличие ключей.
+
+```csharp
+public interface IEnvironmentValidator
+{
+  bool Validate(IEnumerable<string> requiredKeys);
+}
+
+public class EnvironmentValidator(IConfiguration configuration) : IEnvironmentValidator
+{
+  public bool Validate(IEnumerable<string> requiredKeys)
+  {
+    bool allExist = true;
+    foreach (var key in requiredKeys)
+    {
+      if (string.IsNullOrEmpty(configuration[key]))
+      {
+        Console.WriteLine($"Missing env: {key}");
+        allExist = false;
+      }
+    }
+
+    return allExist;
+  }
+}
+```
+
+### 3. Провайдер конфигурации (вместо статических методов)
+
+Используем стандартный `IConfiguration` везде, где нужны настройки.
+
+```csharp
+var configuration = EnvironmentLoader.LoadEnvironment();
+var validator = new EnvironmentValidator(configuration);
+if (!validator.Validate(RequiredKeys.List))
+{
+  Environment.Exit(1);
+}
+
+builder.Services.AddSingleton(configuration);
+builder.Services.Configure<AppSettings>(configuration);
+```
+
+И тогда в любом сервисе мы просто внедряем `IOptions<AppSettings>` или `IConfiguration`:
+
+```csharp
+public class KafkaEventPublisher(IConfiguration config)
+{
+  public async Task PublishOrderCreated(OrderCreatedEvent @event)
+  {
+    var topic = config["ORDER_CREATED_TOPIC"];
+    // ...
+  }
+}
+```
+
+### 4. (Опционально) Сильно типизированный класс настроек
+
+Вместо строковых ключей можно создать класс `AppSettings` и привязать его:
+
+```csharp
+public class AppSettings
+{
+  public string DatabaseHost { get; set; }
+  public string DatabaseUser { get; set; }
+  // ...
+}
+
+builder.Services.Configure<AppSettings>(configuration);
+```
+
+---
+
+## Что мы сделали и зачем
+
+Мы разобрали `Fenvironment` на три независимые части:
+
+- **Загрузчик** — отвечает только за чтение `.env` и наполнение конфигурации.
+- **Валидатор** — проверяет наличие обязательных переменных.
+- **Провайдер** — предоставляет значения через стандартный интерфейс `IConfiguration` или `IOptions`.
+
+Теперь:
+
+- Если изменится источник переменных (например, хранилище секретов) — меняем только загрузчик.
+- Если изменится список обязательных переменных — меняем только валидатор.
+- Если нужно подменить значения в тестах — просто передаём фейковую `IConfiguration`.
+
+Каждый класс имеет **ровно одну причину для изменения**, и они легко тестируются по отдельности.
+
+## Что в итоге
+
+Мы убрали из класса `Fenvironment` три ответственности,
+оставив каждую в своём месте. Это не только исправляет нарушение **SRP**, но и:
+
+- Упрощает тестирование — теперь можно подменить конфигурацию.
+- Делает код более гибким — легко переключиться на другой источник настроек.
+- Устраняет дублирование — теперь не нужно синхронизировать список переменных и статические методы.
+
+> **Запомните:** Когда вы видите класс, который одновременно загружает данные,
+> проверяет их и предоставляет доступ — это красный флаг.
+> Разделяйте обязанности, и ваш код станет чище и надёжнее.
+
+---
+
+_Исходный код до рефакторинга доступен в [репозитории CsTestShop](https://github.com/FOCKUSTY/CsTestShop/blob/cc42c6f594b410cb0f7d46b51f0dd7f04d2649df)._
+
+```
+
+```

@@ -1,0 +1,117 @@
+# Пример с BitField и BitFieldView
+
+_правильное разделение ответственности_
+
+Возьмём пример из [bit-field](https://github.com/FOCKUSTY/bit-field/blob/d4921c08bbd338d922a6358adacbddef0d790363)
+
+- [BitField](https://github.com/FOCKUSTY/bit-field/blob/d4921c08bbd338d922a6358adacbddef0d790363/src/bit-field.ts)
+- [BitFieldView](https://github.com/FOCKUSTY/bit-field/blob/d4921c08bbd338d922a6358adacbddef0d790363/src/bit-field-view.ts).
+
+В этом репозитории есть два класса: `BitFieldView` и `BitField`.
+Они показывают, как **правильно** применять SRP,
+разделяя **представление** и **операции** над битовым полем.
+
+## Что такое BitFieldView
+
+`BitFieldView` — это абстрактный базовый класс,
+который отвечает только за **представление** битового поля:
+
+```typescript
+export abstract class BitFieldView {
+  protected _bit: bigint;
+
+  public toArray(): bigint[] { ... }
+  public toHexString(): string { ... }
+  public toBinaryString(): string { ... }
+  public toNumber(): number { ... }
+  public toString(): string { ... }
+  public toJSON(): string { ... }
+
+  public *[Symbol.iterator](): Generator<bigint> { ... }
+  public forEach(callback: (bit: bigint) => void): void { ... }
+}
+```
+
+**Его единственная ответственность** — предоставлять методы для чтения
+и преобразования битового поля.
+Никакой логики изменения, никаких операций — только представление.
+
+## Что такое BitField
+
+`BitField` наследуется от `BitFieldView` и добавляет **операции изменения**:
+
+```typescript
+export class BitField extends BitFieldView {
+  public add(...bits: MustArray<BitFieldInput>): BitField { ... }
+  public remove(...bits: MustArray<BitFieldInput>): BitField { ... }
+  public clear(): BitField { ... }
+
+  public and(bit: BitFieldInput): BitField { ... }
+  public or(bit: BitFieldInput): BitField { ... }
+  public xor(bit: BitFieldInput): BitField { ... }
+  public not(bitLength?: number): BitField { ... }
+
+  public hasOne(bit: BitFieldInput): boolean { ... }
+  public hasSome(...bits: MustArray<BitFieldInput>): boolean { ... }
+  public has(...bits: MustArray<BitFieldInput>): boolean { ... }
+
+  public setRange(from: number, to: number): BitField { ... }
+  public clearRange(from: number, to: number): BitField { ... }
+}
+```
+
+**Его единственная ответственность** — предоставлять методы для изменения битового поля и проверки состояния.
+
+## Почему это хорошо
+
+### Разделение на чтение и запись
+
+- Если вам нужно только читать битовое поле (например, в функции логирования) — вы можете работать с `BitFieldView`, не имея доступа к изменяющим методам.
+- Если нужно изменять — используйте `BitField`.
+
+Это соответствует принципу **разделения интерфейсов** (ISP) и делает код безопаснее.
+
+### Одна причина для изменения
+
+- Если изменится способ представления (например, добавится поддержка двоичной строки с префиксом) — меняется только `BitFieldView`.
+- Если изменится логика операций (например, добавится метод `toggle`) — меняется только `BitField`.
+
+### Лёгкое тестирование
+
+Каждый класс тестируется независимо.
+Для проверки представления не нужна сложная логика операций, и наоборот.
+
+### Наследование не нарушает LSP
+
+`BitField` — это расширение `BitFieldView`.
+Он добавляет новые методы,
+но не изменяет поведение существующих.
+Любую функцию, принимающую `BitFieldView`, можно безопасно передать `BitField`.
+
+## Что можно было бы улучшить?
+
+Хотя разделение отличное,
+есть один нюанс: `BitField` использует `BitFieldOperations` — статический класс-утилиту.
+Это не нарушает SRP, но можно было бы сделать эти утилиты отдельными функциями или сервисами.
+Однако для небольшой библиотеки это допустимо.
+
+---
+
+## Что в итоге
+
+В `bit-field` мы видим **эталонный пример SRP**:
+
+- `BitFieldView` отвечает только за представление.
+- `BitField` отвечает только за операции.
+
+Каждый класс имеет ровно одну причину для изменения, их легко тестировать и комбинировать.
+Если вы проектируете классы, старайтесь разделять
+**чтение** и **запись**, **представление** и **логику** — это сделает код чище и надёжнее.
+
+> **Запомните:** Разделяйте ответственность по направлениям изменений.
+> Если вы видите, что класс можно разбить на «представление» и «поведение» — сделайте это.
+> Это упростит поддержку и уменьшит риск ошибок при изменении одной из частей.
+
+---
+
+_Исходный код доступен в [репозитории bit-field](https://github.com/FOCKUSTY/bit-field/blob/d4921c08bbd338d922a6358adacbddef0d790363)._
