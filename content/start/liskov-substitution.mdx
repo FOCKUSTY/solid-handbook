@@ -134,35 +134,35 @@ export class Rectangle {
   }
 
   public get width(): number {
-    return this.width;
+    return this._width;
   }
 
   public get height(): number {
-    return this.height;
+    return this._height;
   }
 
   public set width(width: number) {
-    this.width = width;
+    this._width = width;
   }
 
   public set height(height: number) {
-    this.height = height;
+    this._height = height;
   }
 
   public getArea(): number {
-    return this.width * this.height;
+    return this._width * this._height;
   }
 }
 
 export class Square extends Rectangle {
   public override set width(width: number) {
-    this.width = width;
-    this.height = width;
+    this._width = width;
+    this._height = width;
   }
 
   public override set height(height: number) {
-    this.width = height;
-    this.height = height;
+    this._width = height;
+    this._height = height;
   }
 }
 
@@ -201,23 +201,23 @@ export class Rectangle implements Shape {
   }
 
   public get width(): number {
-    return this.width;
+    return this._width;
   }
 
   public get height(): number {
-    return this.height;
+    return this._height;
   }
 
   public set width(width: number) {
-    this.width = width;
+    this._width = width;
   }
 
   public set height(height: number) {
-    this.height = height;
+    this._height = height;
   }
 
   public getArea(): number {
-    return this.width * this.height;
+    return this._width * this._height;
   }
 }
 
