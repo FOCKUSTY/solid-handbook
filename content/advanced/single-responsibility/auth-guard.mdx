@@ -12,15 +12,14 @@
 ```typescript
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(
+  public constructor(
     private readonly service: AuthGuardService,
     private readonly metadataHandler: MetadataHandler,
     private readonly publicHandler: PublicHandler,
     private readonly skipAuthGuardHandler: SkipAuthGuardHandler,
   ) {}
 
-  async canActivate(context: ExecutionContext): Promise<boolean> {
-    // Проверяем метаданные (публичные маршруты, пропуск Guard)
+  public async canActivate(context: ExecutionContext): Promise<boolean> {
     const metadataValidated = await this.validateMetadata(context);
     if (metadataValidated) {
       return true;
@@ -53,12 +52,12 @@ export class AuthGuard implements CanActivate {
 ```typescript
 @Injectable()
 export class OnlyMeGuard implements CanActivate {
-  constructor(
+  public constructor(
     private readonly reflector: Reflector,
     private readonly service: OnlyMeGuardService,
   ) {}
 
-  async canActivate(context: ExecutionContext): Promise<boolean> {
+  public async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<Request>();
     const handler = context.getHandler();
 
@@ -67,7 +66,7 @@ export class OnlyMeGuard implements CanActivate {
       handler,
     );
     if (!metadata) {
-      return true; // если метаданных нет – Guard пропускает
+      return true;
     }
 
     const validated = await this.service.execute(metadata, request);
@@ -99,7 +98,7 @@ export class OnlyMeGuard implements CanActivate {
 ```typescript
 @UseGuards(AuthGuard, OnlyMeGuard)
 @Delete(ROUTES.DELETE)
-delete(@Param("id") id: string) {
+public delete(@Param("id") id: string) {
   // ...
 }
 ```

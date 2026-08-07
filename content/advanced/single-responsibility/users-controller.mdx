@@ -13,17 +13,19 @@
 @Controller(ROUTE)
 @UseGuards(AuthGuard)
 export class UsersController {
-  constructor(private readonly service: Service) {}
+  public constructor(private readonly service: Service) {}
 
   @Get(ROUTES.GET_ONE)
   @Public()
-  getOne(@UserFindOptions(Parameters.slug) options: ResolvedUsernameSlug) {
+  public getOne(
+    @UserFindOptions(Parameters.slug) options: ResolvedUsernameSlug,
+  ) {
     return this.service.getOne(options);
   }
 
   @Update([ROUTES.PUT, ROUTES.PATCH])
   @OnlyMe(Parameters.slug, "slug")
-  put(
+  public put(
     @UserFindOptions(Parameters.slug) options: ResolvedUsernameSlug,
     @Body() data: UserUpdateDto,
   ) {
@@ -32,7 +34,7 @@ export class UsersController {
 
   @Delete(ROUTES.DELETE)
   @OnlyMe(Parameters.id, "id")
-  delete(@Param(Parameters.id) id: string) {
+  public delete(@Param(Parameters.id) id: string) {
     return this.service.delete({ id });
   }
 }
@@ -80,7 +82,7 @@ export class UsersController {
 const where = SlugPipe.resolveMe(slug, me);
 ```
 
-Теперь это делается один раз в декораторе.  
+Теперь это делается один раз в декораторе.
 Все методы используют единообразный подход.
 
 ### 4. Соблюдение Dependency Injection
@@ -90,7 +92,7 @@ const where = SlugPipe.resolveMe(slug, me);
 ```typescript
 @Injectable()
 export class UserFindOptionsPipe implements PipeTransform {
-  constructor(
+  public constructor(
     private readonly slugPipe: UsernameSlugPipe,
     private readonly service: ServerUserService,
   ) {}
@@ -116,5 +118,5 @@ export class UserFindOptionsPipe implements PipeTransform {
 - **Тестируемым** – контроллер можно протестировать, подставив мок-сервис.
 - **Гибким** – изменения в логике поиска пользователя не затрагивают контроллер.
 
-> **Запомните:** Контроллер должен быть «тонким» – его задача только принимать запросы и вызывать сервисы.  
+> **Запомните:** Контроллер должен быть «тонким» – его задача только принимать запросы и вызывать сервисы.
 > Вся остальная логика – это ответственность других классов.
