@@ -20,9 +20,13 @@
 ## Примеры
 
 - [MetadataHandler и цепочка обработчиков в Feeldown](/advanced/open-closed/metadata-handler.mdx)
-- [Стратегии авторизации (PassportStrategy)](/advanced/open-closed/passport-strategies.mdx)
+- [Стратегии авторизации (PassportStrategy)](/advanced/open-closed/strategies-service.mdx)
 - [CrudService и наследование](/advanced/open-closed/crud-service.mdx)
-- [BitField: операции как расширение](/advanced/open-closed/bit-field-operations.mdx)
+- [IEventPublisher: нарушение и исправление](/advanced/open-closed/ievent-publisher.mdx)
+- [Notification Emitters: иерархия эмиттеров](/advanced/open-closed/notifications-emitters.mdx)
+- [BitBuilder: фабричные методы](/advanced/open-closed/bit-builder.mdx)
+- [BitField и BitFieldView: представление и операции](/advanced/open-closed/bit-field.mdx)
+- [Configurable Utilities: SlugPipe, Routes, Enumeration](/advanced/open-closed/configurable-utilities.mdx)
 - [Заключение](/advanced/open-closed/conclusion.mdx)
 
 ### Что за примеры?
@@ -32,24 +36,48 @@
   (`@Public()`, `@SkipAuthGuard()`). Новый тип метаданных добавляется созданием
   нового класса-обработчика, без изменения `AuthGuard` или существующих
   обработчиков. Идеальный пример OCP через паттерн «Цепочка обязанностей».
-- **[Стратегии авторизации](/advanced/open-closed/passport-strategies.mdx)** –
+
+- **[Стратегии авторизации](/advanced/open-closed/strategies-service.mdx)** –
   `StrategiesService` динамически загружает OAuth2-стратегии (Google, GitHub).
   Чтобы добавить новый провайдер, достаточно дописать конфигурацию и класс
   стратегии – основной код остаётся нетронутым. Реализация паттерна «Стратегия».
+
 - **[CrudService и наследование](/advanced/open-closed/crud-service.mdx)** –
   базовый `CrudService` предоставляет общие CRUD-методы. Для каждой модели
   (User, Post, Notification) создаётся сервис-наследник, который переопределяет
-  или расширяет поведение (например, `PostsService` добавляет проверку прав).
-  Базовый класс закрыт для изменений, но открыт для расширения через
-  наследование.
-- **[BitField: операции как расширение](/advanced/open-closed/bit-field-operations.mdx)**
-  – в библиотеке `bit-field` класс `BitField` наследуется от `BitFieldView` и
-  добавляет методы изменения. Можно добавлять новые операции (например,
-  `toggle`), не трогая базовый класс представления – это ещё один пример OCP
-  через наследование.
+  или расширяет поведение. Базовый класс закрыт для изменений, но открыт для
+  расширения через наследование. Показаны компромиссы: сложность типизации и
+  когнитивная нагрузка.
 
-Каждый пример сопровождается анализом «до» и «после», а также пояснениями, как
-рефакторинг помог соблюсти OCP и какие паттерны были использованы.
+- **[IEventPublisher: нарушение и исправление](/advanced/open-closed/ievent-publisher.mdx)**
+  – интерфейс с методами для каждого события (`PublishOrderCreated`,
+  `PublishProductUpdated`) нарушает OCP — новое событие требует изменения
+  интерфейса. Показаны три способа исправления: обобщённый метод, атрибуты и
+  адаптация с обратной совместимостью.
+
+- **[Notification Emitters](/advanced/open-closed/notifications-emitters.mdx)**
+  – иерархия эмиттеров уведомлений. Базовый класс `BaseNotificationsEmitter`
+  содержит общую логику, конкретные эмиттеры (`CommentNotificationsEmitter`,
+  `ReactionNotificationsEmitter`, `FriendshipNotificationsEmitter`) расширяют
+  его. Новый тип уведомлений — новый класс-наследник.
+
+- **[BitBuilder](/advanced/open-closed/bit-builder.mdx)** – статические
+  фабричные методы (`fromConfig`, `fromData`) предоставляют разные сценарии
+  использования одного движка генерации битов. Новый сценарий — новый
+  статический метод.
+
+- **[BitField и BitFieldView](/advanced/open-closed/bit-field.mdx)** –
+  разделение представления (`BitFieldView`) и операций (`BitField`). Базовый
+  класс закрыт для изменений, новые операции добавляются через наследование.
+  Иммутабельность упрощает тестирование и предотвращает побочные эффекты.
+
+- **[Configurable Utilities](/advanced/open-closed/configurable-utilities.mdx)**
+  – три утилиты (`SlugPipe`, `Routes`, `Enumeration`) показывают OCP через
+  конфигурацию, дженерики и фабрики. Новые типы добавляются без изменения
+  существующего кода.
+
+Каждый пример сопровождается анализом «что хорошо», «что плохо» и финальным
+улучшенным кодом.
 
 ## Чек-лист: не нарушаете ли вы OCP?
 
