@@ -75,7 +75,7 @@ export class SkipAuthGuardHandler extends AbstractMetadataHandler {
 }
 ```
 
-### AuthGuard, который использует цепочку
+### AuthGuard — не меняется
 
 ```typescript
 @Injectable()
@@ -115,50 +115,19 @@ export class AuthGuard implements CanActivate {
 
 - `AuthGuard` вызывает `metadataHandler.apply(...).execute()`.
 - В `apply` передаются конкретные обработчики.
-- Если появляется новый тип метаданных (например, `@Roles('admin')`), мы:
-  1. Создаём новый класс-обработчик, реализующий `MetadataHandlerType`.
-  2. Добавляем его в вызов `apply()`.
-  3. **Не трогаем** ни `AuthGuard`, ни `MetadataHandler`, ни существующие
-     обработчики.
-
-Это классический пример **открытости для расширения** (новые обработчики) и
-**закрытости для изменения** (существующий код не правится).
-
-### Чёткое разделение ответственности
-
-- `MetadataHandler` отвечает только за последовательный вызов обработчиков и
-  остановку при первом успешном.
-- Каждый обработчик отвечает только за проверку одного конкретного метаданных.
-- `AuthGuard` отвечает только за аутентификацию, но делегирует проверку
-  метаданных цепочке.
-
-### Легко тестировать
-
-Каждый обработчик тестируется изолированно. `MetadataHandler` тестируется с
-мок-обработчиками. `AuthGuard` тестируется с реальной цепочкой или заглушкой.
-
----
-
-## Как это работает: паттерн «Цепочка обязанностей»
-
-`MetadataHandler` реализует упрощённый вариант паттерна **Chain of
-Responsibility**:
-
-- Обработчики выполняются последовательно.
-- Первый, кто возвращает `true`, прерывает цепочку.
-- Если ни один не вернул `true`, цепочка возвращает `false`.
-
-В `AuthGuard` это используется для «отключения» аутентификации на публичных
-маршрутах или маршрутах, помеченных `@SkipAuthGuard()`.
+- Если появляется новый тип метаданных, мы создаём новый обработчик, но **не
+  меняем `AuthGuard`** — он остаётся закрытым для изменений.
 
 ---
 
 ## Пример расширения: добавляем `@Roles()`
 
-Допустим, мы хотим добавить проверку ролей — эндпоинт доступен только
-пользователям с ролью `admin`.
+Допустим, мы хотим добавить проверку ролей. Вместо того чтобы добавлять
+`RolesHandler` в `AuthGuard`, мы создаём **отдельный Guard** — `RolesGuard`. Это
+соблюдает **SRP** (аутентификация и авторизация — разные ответственности) и
+**OCP** (`AuthGuard` не меняется).
 
-**1. Создаём декоратор `@Roles`:**
+### 1. Создаём декоратор `@Roles`
 
 ```typescript
 import { SetMetadata } from "@nestjs/common";
@@ -167,7 +136,7 @@ import { Metadata } from "@/enums";
 export const Roles = (...roles: string[]) => SetMetadata(Metadata.roles, roles);
 ```
 
-**2. Добавляем новое значение в `Metadata` enum:**
+### 2. Добавляем новое значение в `Metadata` enum
 
 ```typescript
 export const enum Metadata {
@@ -179,7 +148,7 @@ export const enum Metadata {
 }
 ```
 
-**3. Создаём обработчик `RolesHandler`:**
+### 3. Создаём обработчик `RolesHandler`
 
 ```typescript
 import type { ExecutionContext } from "@nestjs/common";
@@ -212,42 +181,46 @@ export class RolesHandler extends AbstractMetadataHandler {
 }
 ```
 
-**4. Добавляем `RolesHandler` в цепочку в `AuthGuard`:**
+### 4. Создаём отдельный `RolesGuard`, который использует `MetadataHandler`
 
 ```typescript
-private async validateMetadata(context: ExecutionContext) {
-  return this.metadataHandler
-    .apply(
-      this.publicHandler,
-      this.skipAuthGuardHandler,
-      this.rolesHandler,
-    )
-    .execute(context);
+import type { CanActivate, ExecutionContext } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
+import { MetadataHandler } from "@1/handlers";
+import { RolesHandler } from "./roles.handler";
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  public constructor(
+    private readonly metadataHandler: MetadataHandler,
+    private readonly rolesHandler: RolesHandler,
+  ) {}
+
+  public async canActivate(context: ExecutionContext): Promise<boolean> {
+    return this.metadataHandler.apply(this.rolesHandler).execute(context);
+  }
 }
 ```
 
-**5. Теперь можно использовать `@Roles()` в контроллерах:**
+### 5. Используем оба Guard'а в контроллере
 
 ```typescript
-@Roles('admin')
+@UseGuards(AuthGuard, RolesGuard)
 @Delete('/users/:id')
 public deleteUser(@Param('id') id: string) {
-  // только для админов
+  // сначала аутентификация (AuthGuard), потом авторизация (RolesGuard)
 }
 ```
 
 **Что мы получили?**
 
-- Ни одной строчки в `AuthGuard` не изменили (кроме добавления `rolesHandler` в
-  `apply`, но это **расширение**, а не изменение).
-- `MetadataHandler`, `PublicHandler`, `SkipAuthGuardHandler` остались
-  нетронутыми.
-- Новый функционал добавлен через новый класс.
+- `AuthGuard` остался нетронутым — он проверяет только аутентификацию.
+- `RolesGuard` отвечает только за проверку ролей.
+- `MetadataHandler` переиспользуется в обоих Guard'ах.
+- Новый функционал добавлен через новые классы, без изменения существующего
+  кода.
 
-_В модуле `AuthGuard` мы регистрируем все обработчики в провайдерах, и NestJS
-автоматически внедряет зависимости через конструктор. Благодаря этому
-`RolesHandler` получает доступ к `ServerUserService` без явного создания
-экземпляров_
+Это **идеальное соблюдение OCP** и **SRP**.
 
 ---
 
@@ -259,13 +232,10 @@ _В модуле `AuthGuard` мы регистрируем все обработ
 - Код **закрыт для изменения** — существующие классы не трогаются при добавлении
   новой функциональности.
 
-Такой подход делает систему гибкой, тестируемой и лёгкой в поддержке. Если в
-будущем понадобится новый тип метаданных (например, `@RateLimit()` или
-`@FeatureToggle()`), мы просто создадим ещё один обработчик — и всё.
-
 > **Запомните:** Если вы видите цепочки `if/else` по типу метаданных — это
 > признак нарушения OCP. Вместо этого используйте цепочку обработчиков, как в
-> `MetadataHandler`. Это сделает ваш код готовым к изменениям.
+> `MetadataHandler`. И не забывайте разделять аутентификацию и авторизацию на
+> разные Guard'ы — так вы соблюдёте и SRP, и OCP.
 
 ---
 
