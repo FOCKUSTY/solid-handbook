@@ -1,347 +1,117 @@
-# Пример с AuthGuard
+# Пример с AuthGuard и OnlyMeGuard
 
-Возьмём пример из [feeldown-backend](https://github.com/FOCKUSTY/feeldown-backend/blob/16a669acf70daedecc88d5bd2d937abec0cffb56/src/v1/guards/auth/auth.guard.ts#L17-L115)
+Возьмём пример из feeldown-backend (ссылка вне зоны доступа).
 
-С первого взгляда кажется, что класс перенасыщен, проверка метаданных, hash-сервис, парсинг slug-а,
-однако на самом деле этот класс делегирует задачи профильным утилитам.
+В проекте Feeldown аутентификация и авторизация разделены на два независимых Guard-а: `AuthGuard` и `OnlyMeGuard`.
+Это отличный пример **Single Responsibility Principle** (SRP) в действии.
 
-1. Делегирование задач
+---
 
-- `AuthGuardService` выполняет всю работу по валидации запроса, а наш guard просто вызывает `this.service.validateRequest(request)`.
-- `HashService` выполняет роль парсера токена и всех операций, связанных с криптографией и токенами.
-- `SlugPipe` парсит сложные slug-и.
-
-2. Разделение логики
-
-- `validateMetadata` валидирует все метаданные, проверяет прав доступа, разделяем основную работу и второстепенную.
-- `validateOnlyMe` отдельная большая валидация `OnlyMe`-метаполя.
-- `validateUsername` просто защита от дублирования кода.
-
-3. Использование `tryCatchThrow`, чтобы избавиться от больших повторяющихся `try-catch`-блоков.
-
-> `AuthGuard` демонстрирует стремление к SRP,
-> потому что делегирует часть работы (валидацию, криптографию, парсинг slug) профильным сервисам.
-> Однако он всё ещё нарушает принцип, смешивая аутентификацию и авторизацию,
-> а также трансформацию данных.
-> Его главная проблема — не размер,
-> а размытие границ ответственности.
-> Давайте разберём, что именно пошло не так и как это исправить.
-
-## Что плохо
-
-1. `validateOnlyMe` можно было вынести в отдельный Guard или в отдельный сервис, чтобы Guard занимался только пропуском
-2. Смешивание ответственности:
-
-- AuthGuard проверяет, авторизован ли пользователь и имеет ли он доступ к конкретному ресурсу (Authentication и Authorization),
-  лучше всего разделить его два два Guard-а.
-
-3. `validateMetadata` валидирует все метаданные в одном месте через условия, что нарушает open-closed принцип,
-   лучше всего сделать `MetadataHandler`, чтобы не изменять метод, а добавлять класс и изменять только массив всех метаданных.
-4. `SlugPipe` в Guard-е недопустим, потому что он трансформирует данные, что Guard делать не должен,
-   лучше всего попробовать передать уже спрасированные данные или вынести парсер в отдельный сервис.
-
-## Однако
-
-**«Однако»** — несмотря на выявленные недостатки, `AuthGuard` всё же демонстрирует главную идею SRP:
-**класс должен иметь только одну причину для изменения**.
-В текущей реализации такой причиной является **управление потоком аутентификации** (пропустить или отклонить запрос).
-Всё, что выходит за эти рамки (парсинг slug, криптография, проверка метаданных), уже делегировано, пусть и не идеально.
-
-Настоящая проблема — не в нарушении SRP как такового,
-а в **смешении уровней абстракции** и **нарушении Open/Closed Principle**.
-Если мы выделим `OnlyMeGuard` и `MetadataHandlerChain`, то `AuthGuard` станет эталонным примером SRP:
-его единственная задача — скомпоновать результаты проверок и принять решение.
-
-## Улучшенный код
-
-`only-me.guard.ts`
+## AuthGuard – отвечает только за аутентификацию
 
 ```typescript
-import type { ExecutionContext } from "@nestjs/common";
-import type { OnlyMeMetadata } from "@types";
-import type { Request } from "express";
-
-import {
-  Injectable,
-  CanActivate,
-  ExecutionContext,
-  ForbiddenException,
-} from "@nestjs/common";
-import { Reflector } from "@nestjs/core";
-
-import { Metadata } from "@/enums";
-
-import { OnlyMeGuardService } from "./only-me-guard.service";
-
-@Injectable()
-export class OnlyMeGuard implements CanActivate {
-  public constructor(
-    private readonly reflector: Reflector,
-    private readonly service: OnlyMeGuardService,
-    private readonly serverUserService: ServerUserService,
-  ) {}
-
-  public async canActivate(context: ExecutionContext): Promise<boolean> {
-    const onlyMeMetadata = this.reflector.get<OnlyMeMetadata>(
-      Metadata.isOnlyMe,
-      context.getHandler(),
-    );
-    if (!onlyMeMetadata) {
-      return true;
-    }
-
-    const request = context.switchToHttp().getRequest<Request>();
-    const user = this.serverUserService.getByRequest(request);
-    if (!user) {
-      throw new ForbiddenException("User not authenticated");
-    }
-
-    const validated = await this.service.execute(
-      user,
-      onlyMeMetadata,
-      request.params,
-    );
-    if (!validated) {
-      throw new ForbiddenException("You are not the owner of this resource");
-    }
-
-    return true;
-  }
-}
-
-export const ONLY_ME_GUARD_PROVIDERS = [
-  OnlyMeGuardService,
-  ServerUserService,
-  PrismaService,
-] as const;
-
-export default OnlyMeGuard;
-```
-
-`auth.guard.ts`
-
-```typescript
-import type { ExecutionContext } from "@nestjs/common";
-import type { Request } from "express";
-
-import { Injectable, CanActivate } from "@nestjs/common";
-import { Reflector } from "@nestjs/core";
-import { Metadata } from "@/enums";
-
-import { AuthGuardService } from "./auth-guard.service";
-
 @Injectable()
 export class AuthGuard implements CanActivate {
-  public constructor(
-    private readonly reflector: Reflector,
+  constructor(
     private readonly service: AuthGuardService,
-    private readonly serverUserService: ServerUserService,
+    private readonly metadataHandler: MetadataHandler,
+    private readonly publicHandler: PublicHandler,
+    private readonly skipAuthGuardHandler: SkipAuthGuardHandler,
   ) {}
 
-  public async canActivate(context: ExecutionContext): Promise<boolean> {
-    const handler = context.getHandler();
-    const isPublic = this.reflector.get<boolean>(Metadata.isPublic, handler);
-    if (isPublic) {
-      return true;
-    }
-
-    const skipAuthGuard = this.reflector.get<boolean>(
-      Metadata.skipAuthGuard,
-      handler,
-    );
-    if (skipAuthGuard) {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    // Проверяем метаданные (публичные маршруты, пропуск Guard)
+    const metadataValidated = await this.validateMetadata(context);
+    if (metadataValidated) {
       return true;
     }
 
     const request = context.switchToHttp().getRequest<Request>();
-    const user = await this.service.execute(request);
-    if (!user) {
-      throw new UnauthorizedException("Invalid credentials");
-    }
-
-    this.serverUserService.setByRequest(request, user);
-
-    return true;
-  }
-}
-
-export const AUTH_GUARD_PROVIDERS = [
-  AuthGuardService,
-  ServerUserService,
-  PrismaService,
-] as const;
-
-export default AuthGuard;
-```
-
-> _Примечание: здесь использовано упрощение. По-хорошему для каждой метадаты использовано свой класс, однако
-> в данном случае это может оказаться переусложнение кода._
->
-> _Здесь можно было бы применить паттерн "Цепочка обязанностей", но для трёх условий мы пока оставляем так, чтобы не переусложнять_
-
-Пример в контроллере:
-
-```typescript
-@Controller("posts")
-export class PostsController {
-  @Public()
-  @Get("public")
-  public get() {
-    /* ... */
+    const validate = () => this.service.validateRequest(request);
+    return tryCatchThrow(validate);
   }
 
-  @UseGuards(AuthGuard)
-  @Post()
-  public post(@Body() post: CreatePostDto) {
-    /* ... */
-  }
-
-  @UseGuards(AuthGuard, OnlyMeGuard)
-  @Delete(ROUTES.DELETE)
-  public delete(@Parameter("id") id: string) {
-    /* ...  */
+  private async validateMetadata(context: ExecutionContext) {
+    return this.metadataHandler
+      .apply(this.publicHandler, this.skipAuthGuardHandler)
+      .execute(context);
   }
 }
 ```
 
-### Альтернативный подход: цепочка обработчиков метаданных
+**Что хорошо:**
 
-Вместо того чтобы проверять все метаданные внутри одного метода `validateMetadata` через условия, можно применить паттерн **«Цепочка обязанностей»**. Тогда каждый тип метаданных получает свой обработчик, и новые типы добавляются без изменения существующего кода.
+- `AuthGuard` **не знает**, как именно проверяется токен – это делегировано `AuthGuardService`.
+- Для обработки метаданных используется цепочка обработчиков (`MetadataHandler`, `PublicHandler`, `SkipAuthGuardHandler`), что делает код гибким и открытым для расширения (OCP).
+- Все зависимости внедряются через конструктор – нет нарушений **Dependency Injection**.
+- У класса **одна причина для изменения**: изменение логики аутентификации (например, переход с JWT на сессии).
+
+---
+
+## OnlyMeGuard – отвечает только за проверку владельца ресурса
 
 ```typescript
-export type MetadataHandlerType = {
-  execute(context: ExecutionContext): Promise<boolean>;
-};
-
 @Injectable()
-export class PublicHandler implements MetadataHandlerType {
-  public constructor(private readonly reflector: Reflector) {}
-
-  public async execute(context: ExecutionContext): Promise<boolean> {
-    const isPublic = this.reflector.get<boolean>(
-      Metadata.isPublic,
-      context.getHandler(),
-    );
-    return !isPublic;
-  }
-}
-
-@Injectable()
-export class OnlyMeHandler implements MetadataHandlerType {
-  public constructor(
+export class OnlyMeGuard implements CanActivate {
+  constructor(
     private readonly reflector: Reflector,
-    private readonly serverUserService: ServerUserService,
     private readonly service: OnlyMeGuardService,
   ) {}
 
-  public async execute(context: ExecutionContext): Promise<boolean> {
-    const onlyMeMetadata = this.reflector.get<OnlyMeMetadata>(
-      Metadata.isOnlyMe,
-      context.getHandler(),
-    );
-    if (!onlyMeMetadata) {
-      return true;
-    }
-
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<Request>();
-    const user = this.serverUserService.getByRequest(request);
-    if (!user) {
-      throw new ForbiddenException("User not authenticated");
-    }
+    const handler = context.getHandler();
 
-    const validated = await this.service.execute(
-      user,
-      onlyMeMetadata,
-      request.params,
+    const metadata = this.reflector.get<OnlyMeMetadata>(
+      Metadata.isOnlyMe,
+      handler,
     );
-    if (!validated) {
-      throw new ForbiddenException("You are not the owner of this resource");
+    if (!metadata) {
+      return true; // если метаданных нет – Guard пропускает
     }
 
-    return true;
-  }
-}
-
-@Injectable()
-export class MetadataHandler {
-  public constructor(private readonly reflector: Reflector) {}
-
-  public async execute(
-    handlers: MetadataHandlerType[],
-    context: ExecutionContext,
-  ) {
-    for (const handler of handlers) {
-      const result = await handler.execute(context);
-      if (!result) {
-        return false;
-      }
-    }
-
-    return true;
+    const validated = await this.service.execute(metadata, request);
+    return validated;
   }
 }
 ```
 
-Этот подход **открыт для расширения** (новый тип метаданных = новый класс) и **закрыт для изменения** (существующие обработчики не трогаем).
+**Что хорошо:**
 
-## Что мы сделали и зачем
+- `OnlyMeGuard` **только** проверяет наличие метаданных `@OnlyMe()` и делегирует основную логику сервису `OnlyMeGuardService`.
+- Он не занимается парсингом токенов, работой с БД или трансформацией параметров – всё это вынесено.
+- Его единственная ответственность – решить, пропускать запрос или нет, основываясь на метаданных и результате сервиса.
+- Изменение правил проверки владельца затрагивает только `OnlyMeGuardService`, а сам Guard остаётся нетронутым.
 
-Мы взяли `AuthGuard`, который успел обрасти ответственностью, и аккуратно разобрали его на части.
-Не потому что он плохой — просто каждая деталь теперь лежит там, где ей положено.
+---
 
-Вот что конкретно произошло:
+## Разделение аутентификации и авторизации
 
-1. **`OnlyMeGuard` уехал в отдельный гараж.**
-   Вся логика с `isOnlyMe`, сравнением `id`, `username` и `slug` — всё это переехало в новый класс.
-   Теперь он занимается ровно одним делом: проверяет, имеет ли пользователь право распоряжаться этим ресурсом. И больше ничем.
+Вместо одного «толстого» Guard-а, который делал всё, мы получили два узкоспециализированных класса:
 
-2. **`AuthGuard` перестал быть универсальной сущностью.**
-   Его задача теперь кристально прозрачна:
-   - проверить, не публичный ли маршрут (`isPublic`);
-   - не пропущен ли он специальным флагом (`skipAuthGuard`);
-   - если нет — провалидировать учётные данные через `AuthGuardService`;
-   - и положить пользователя в `ServerUserService`, чтобы остальные знали, кто тут главный.
+| Guard         | Ответственность                                                 |
+| ------------- | --------------------------------------------------------------- |
+| `AuthGuard`   | Проверить, что пользователь аутентифицирован (токен валиден)    |
+| `OnlyMeGuard` | Проверить, что текущий пользователь является владельцем ресурса |
 
-3. **`ServerUserService` стал центральным диспетчером по пользователям.**
-   Раньше каждый Guard сам решал, как достать пользователя:
-   кто через `request.user`,
-   кто через `HashService`.
-   Теперь всё идёт через один сервис. Он знает, где лежит пользователь,
-   и умеет его доставать — хоть из `request`, хоть из кэша, хоть из базы.
-   Остальным об этом думать не надо.
+Это позволяет гибко комбинировать их в контроллерах:
 
-4. **Зависимости похудели.**
-   Из `AuthGuard` улетели `SlugPipe` и `HashService` — они там больше не нужны.
-   Из `OnlyMeGuard` убрали всю муть с токенами.
-   Каждый Guard знает ровно столько, сколько ему нужно, и не лезет в чужие дела.
+```typescript
+@UseGuards(AuthGuard, OnlyMeGuard)
+@Delete(ROUTES.DELETE)
+delete(@Param("id") id: string) {
+  // ...
+}
+```
 
-5. **Guard-ы теперь можно смешивать как конструктор.**
-   Хотите просто проверить, что пользователь залогинен? Берите `AuthGuard`.
-   Хотите ещё и проверить, что он владеет ресурсом? Добавьте `OnlyMeGuard`.
-   Хотите открытый маршрут? Просто повесьте `@Public()` — и ни одного Guard.
+---
 
-## Что в итоге
+## Что мы получаем
 
-Теперь у каждого Guard **ровно одна причина, чтобы измениться**:
+- **Чёткое разделение ответственности** – каждый Guard делает ровно одно дело.
+- **Лёгкость тестирования** – каждый Guard и его сервис тестируются изолированно.
+- **Гибкость** – можно легко добавить новый Guard (например, `RolesGuard`) без изменения существующих.
+- **Соблюдение DIP** – зависимости внедряются, а не создаются внутри.
 
-- `AuthGuard` переписывают только тогда, когда меняют **логику аутентификации** — например, переходят с JWT на сессии или добавляют новый тип токена.
-- `OnlyMeGuard` трогают только тогда, когда меняются **правила доступа** — например, появляется новый способ проверки владельца (по email или по uuid).
-- `ServerUserService` живёт своей жизнью и отвечает за то, чтобы пользователь всегда был под рукой.
-
-Мы не просто починили нарушение SRP — мы сделали код **гибким, читаемым и удобным для тестирования**.
-И, что важно, теперь, когда через полгода придёт новый разработчик и откроет этот файл,
-ему не придётся гадать, что тут за что отвечает.
-Всё разложено по полочкам.
-
-А главное — мы убрали **смешение уровней абстракции**.
-Теперь `AuthGuard` не знает, как парсить slug, а `OnlyMeGuard` не знает, как работать с токенами.
-Каждый занимается своим делом — и делает это хорошо.
-
-> **Запомните:** SRP — это не про размер класса или количество методов.
-> Это про **направление изменений**.
-> Если изменение требований к аутентификации заставляет менять код парсинга slug — значит,
-> ответственность размазана.
-> Если же вы можете добавить новый тип авторизации,
-> не трогая `AuthGuard`, — вы на верном пути.
-> Главное — разделять аутентификацию и авторизацию,
-> делегировать детали, и тогда класс будет иметь ровно одну причину для изменения.
+> **Вывод:** `AuthGuard` и `OnlyMeGuard` – это эталонный пример SRP в реальном проекте.  
+> Они показывают, как грамотно разбить сложную логику на маленькие, легко поддерживаемые куски.

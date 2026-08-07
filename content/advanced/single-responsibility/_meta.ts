@@ -7,4 +7,5 @@ export default {
   "bit-builder": {},
   "check-list": {},
   conclusion: {},
+  deprecated: "Устарело",
 };

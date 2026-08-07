@@ -1,0 +1,266 @@
+# Пример UsersController
+
+Возьмём пример из [feeldown-backend](https://github.com/FOCKUSTY/feeldown-backend/blob/16a669acf70daedecc88d5bd2d937abec0cffb56/src/v1/routes/users/users.controller.ts)
+
+На первый взгляд — аккуратный, лаконичный, с декораторами и чёткими методами. Но давай копнём глубже.
+
+## Что хорошо
+
+### Чёткое разделение ответственности
+
+Контроллер занимается только тем, для чего он создан — **маршрутизацией**.
+Вся бизнес-логика вынесена в `UsersService`. Это идеальное попадание в SRP.
+
+```typescript
+public constructor(private readonly service: Service) {}
+```
+
+### Правильное использование декораторов
+
+- `@Public()` — для публичных маршрутов.
+- `@OnlyMe()` — для проверки владения ресурсом (авторизация).
+- `@UseGuards(AuthGuard)` — аутентификация на уровне всего контроллера.
+
+Это гибкая система, которую легко комбинировать.
+
+### Типизация
+
+Использование `ResolvedUsernameSlug` и `ServerUser` — типы явно продуманы и помогают избежать ошибок.
+
+### Единообразие методов
+
+Все методы (`put`, `patch`, `delete`) используют одинаковый подход:
+получают `slug`, преобразуют его в `where` через `SlugPipe.resolveMe()`,
+и передают в сервис. Это уменьшает когнитивную нагрузку.
+
+## Что плохо
+
+### SlugPipe в контроллере
+
+Часто вызывается `SlugPipe.resolveMe(slug, me)`, однако контроллер не должен знать о SlugPipe,
+эту задачу лучше всего переложить на ещё один декоратор, чтобы избежать изменения
+этого вызова и от дублирования кода.
+
+## Улучшенный код
+
+`users.controller.ts`
+
+```typescript
+import type { ResolvedUsernameSlug } from "@1/types";
+import type { ServerUser } from "@1/types/server.types";
+
+import {
+  Controller,
+  Injectable,
+  Get,
+  Param,
+  Body,
+  Delete,
+  UseGuards,
+} from "@nestjs/common";
+import { ApiOperation } from "@nestjs/swagger";
+
+import { Public, Me, OnlyMe, Update } from "@/decorators";
+import { Parameters } from "@1/enums";
+import { SlugPipe } from "@1/pipes";
+import { AuthGuard } from "@1/guards";
+
+import { UserUpdateDto } from "./dto";
+
+import { ROUTE, ROUTES, OPERATIONS } from "./users.routes";
+import { UsersService as Service } from "./users.service";
+
+@Injectable()
+@Controller(ROUTE)
+@UseGuards(AuthGuard)
+export class UsersController {
+  public constructor(private readonly service: Service) {}
+
+  @ApiOperation(OPERATIONS.GET_ONE)
+  @Get(ROUTES.GET_ONE)
+  @Public()
+  public getOne(
+    @UserFindOptions(Parameters.slug)
+    options: UserFindOptions,
+  ) {
+    return this.service.getOne(options);
+  }
+
+  @ApiOperation(OPERATIONS.PUT)
+  @ApiOperation(OPERATIONS.PATCH)
+  @Update([ROUTES.PUT, ROUTES.PATCH])
+  public update(
+    @UserFindOptions(Parameters.slug)
+    options: UserFindOptions,
+    @Body() data: UserUpdateDto,
+  ) {
+    return this.service.update(options, data);
+  }
+
+  @ApiOperation(OPERATIONS.DELETE)
+  @Delete(ROUTES.DELETE)
+  @OnlyMe(Parameters.id, "id")
+  public delete(@Param(Parameters.id) id: string) {
+    return this.service.delete(id);
+  }
+}
+
+export default UsersController;
+```
+
+Пример работы `UserFindOptions`:
+
+`user-find-options.decorator.ts`
+
+```typescript
+import type { Request } from "express";
+import type { ExecutionContext } from "@nestjs/common";
+import type { PrismaService } from "@/database";
+
+import { createParamDecorator, HttpException, HttpStatus} from "@nestjs/common";
+
+import { SlugPipe } from "@1/pipes";
+import { ServerUserService } from "@1/services";
+
+import { prisma } from "@/database";
+
+export const UserFindOptions = createParamDecorator<Properties>((
+  parameter: string;
+  context: ExecutionContext
+) => {
+  const request = context.switchToHttp().getRequest<Request>();
+  const value = request.params[parameter] as string;
+  if (!value) {
+    throw new HttpException("Parameter is not defined", HttpStatus.BAD_REQUEST);
+  }
+
+  const pipe = new SlugPipe("username"); // Нарушение DIP
+  const slug = pipe.transform(value);
+
+  const serverUserService = new ServerUserService(prisma as PrismaService); // Нарушение DIP
+  const me = serverUserService.getByRequest(request);
+
+  const findOptions = SlugPipe.resolveMe(slug, me.user.id);
+  return findOptions;
+});
+```
+
+> _Примечание: здесь использовано упрощение для наглядности; в реальном проекте применяйте DI._
+
+## Проблема, которую мы решали
+
+В исходном `UsersController` было несколько моментов, которые нарушали **SRP** и создавали дублирование:
+
+```typescript
+@Put(ROUTES.PUT)
+@OnlyMe(Parameters.slug, "slug")
+public put(
+  @Param(Parameters.slug, new SlugPipe("username")) slug: ResolvedUsernameSlug,
+  @Body() data: UserUpdateDto,
+  @Me() me: ServerUser,
+) {
+  const where = SlugPipe.resolveMe(slug, me); // вот это повторяется
+  return this.service.put(where, data);
+}
+```
+
+**Что было не так:**
+
+- Контроллер знал о `SlugPipe` и его методе `resolveMe`.
+- Логика трансформации повторялась в трёх методах.
+- При изменении логики поиска пользователя пришлось бы править все методы.
+- Контроллер делал больше, чем должен.
+
+---
+
+## Что мы сделали
+
+### Создали декоратор `@UserFindOptions`
+
+Вместо того чтобы вручную вызывать `SlugPipe.resolveMe()` в каждом методе, мы создали параметр-декоратор:
+
+```typescript
+@UserFindOptions(Parameters.slug)
+options: UserFindOptions
+```
+
+Декоратор берёт параметры запроса, получает текущего пользователя и строит готовый объект `findOptions`.
+
+### Контроллер перестал знать о трансформации
+
+Теперь каждый метод просто принимает готовый `options` и передаёт его в сервис:
+
+```typescript
+@Put(ROUTES.PUT)
+@OnlyMe(Parameters.slug, "slug")
+public put(
+  @UserFindOptions() options: UserFindOptions,
+  @Body() data: UserUpdateDto,
+) {
+  return this.service.update(options, data);
+}
+```
+
+### Убрали дублирование
+
+Раньше `resolveMe` вызывался в трёх местах. Теперь — только в декораторе.
+
+### Объединили PUT и PATCH
+
+С помощью кастомного декоратора `@Update` мы объединили два метода в один:
+
+```typescript
+@Update([ROUTES.PUT, ROUTES.PATCH])
+public update(
+  @UserFindOptions() options: UserFindOptions,
+  @Body() data: UserUpdateDto,
+) {
+  return this.service.update(options, data);
+}
+```
+
+## Что в итоге
+
+Мы взяли `UsersController`, который делал чуть больше, чем должен,
+и аккуратно переложили часть ответственности на декоратор.
+
+Вот что конкретно изменилось:
+
+1. **Контроллер перестал знать о `SlugPipe`.**
+   Раньше в каждом методе приходилось вручную вызывать `SlugPipe.resolveMe()`,
+   а теперь эту работу делает декоратор `@UserFindOptions`.
+   Контроллер просто принимает готовый объект `options`
+   и передаёт его в сервис.
+
+2. **Исчезло дублирование.**
+   Логика трансформации `slug` в `where` повторялась в трёх методах.
+   Теперь она живёт в одном месте — в декораторе.
+   Если логика изменится, правим только декоратор.
+
+3. **Методы стали проще и единообразнее.**
+   Все методы `put`, `patch` и `delete` теперь используют одинаковый подход:
+   получают параметры через декораторы и сразу передают их в сервис.
+   Это снижает когнитивную нагрузку.
+
+4. **Объединили PUT и PATCH.**
+   С помощью кастомного декоратора `@Update`
+   мы свели два почти одинаковых метода в один,
+   убрав ещё один источник дублирования.
+
+5. **Упростилось тестирование.**
+   Теперь контроллер не зависит от реализации
+   `SlugPipe` и `ServerUserService` — вся эта логика спрятана в декораторе.
+   При тестировании контроллера достаточно подставить моковый `options`.
+
+## Что теперь
+
+- У `UsersController` осталась **ровно одна причина для изменения** — когда меняются маршруты или формат ответа.
+- Вся логика трансформации вынесена в декоратор, который можно развивать независимо.
+- Код стал чище, читаемее и проще для новичков.
+
+> **Запомните:** Контроллер должен заниматься только маршрутизацией.
+> Если вы видите в нём логику трансформации данных,
+> вызовы `new` или работу с `pipe` — это сигнал, что SRP нарушен.
+> Выносите такие детали в декораторы, сервисы или фабрики.
+> Чем меньше знает контроллер о внутреннем устройстве других слоёв,
+> тем проще его тестировать и поддерживать.
