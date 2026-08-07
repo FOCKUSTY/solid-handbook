@@ -1,0 +1,358 @@
+# StrategiesService
+
+Возьмём пример из
+[feeldown-backend](https://github.com/FOCKUSTY/feeldown-backend/blob/8fc16b92f103e3c7adb92f011678194a4e979f0c/src/v1/services/strategies.service.ts).
+
+В проекте реализована аутентификация через OAuth2-провайдеры (Google, GitHub).
+За это отвечает `StrategiesService`, который динамически загружает стратегии
+Passport.js на основе конфигурации. Это ещё один пример **Open-Closed
+Principle** — добавление нового провайдера не требует изменения существующего
+кода.
+
+---
+
+## Код
+
+### StrategiesService — фабрика стратегий
+
+```typescript
+import type {
+  OAuth2ServiceProperties,
+  PassportAuthTypes,
+  Strategies,
+  VerifyFunction,
+} from "@1/types";
+
+import { PassportStrategy } from "@nestjs/passport";
+import { Injectable } from "@nestjs/common";
+
+import { getPassportEnv, LoggerService } from "@/services";
+import { STRATEGIES_SERVICE_ERRORS } from "../errors";
+import { AuthStrategy } from "../strategies";
+
+import passport from "passport";
+import { prisma } from "@/database";
+
+// Сериализация/десериализация пользователя в сессию
+passport.serializeUser((user, done) => {
+  done(null, user.auth.id);
+});
+
+passport.deserializeUser(async (id: string, done) => {
+  try {
+    const auth = await prisma.auth.findUnique({ where: { id } });
+    if (!auth) {
+      return done(new Error("Auth not found"), null);
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: auth.userId } });
+    if (!user) {
+      return done(new Error("User not found"), null);
+    }
+
+    done(null, { auth, user });
+  } catch (err) {
+    done(err, null);
+  }
+});
+
+// Конфигурация провайдеров
+const oauth2Services: Record<PassportAuthTypes, OAuth2ServiceProperties> = {
+  google: {
+    path: "passport-google-oauth20",
+    scope: ["openid", "profile", "email"],
+  },
+  github: {
+    path: "passport-github",
+    scope: [],
+  },
+};
+
+@Injectable()
+export class StrategiesService {
+  public static readonly strategies: Strategies = new Map();
+
+  public static getStrategy(service: string) {
+    const strategy = this.strategies.get(service as PassportAuthTypes);
+    if (!strategy) {
+      throw STRATEGIES_SERVICE_ERRORS.STRATEGY_NOT_FOUND.execute();
+    }
+
+    return strategy;
+  }
+
+  public constructor(
+    private readonly logger: LoggerService,
+    private readonly authStrategy: AuthStrategy,
+  ) {
+    this.execute();
+  }
+
+  public execute() {
+    for (const oauth2Service in oauth2Services) {
+      const service = oauth2Service as PassportAuthTypes;
+      this.createStrategy(service, this.verify(service));
+    }
+  }
+
+  public createStrategy(service: PassportAuthTypes, verify: VerifyFunction) {
+    const { path, scope } = oauth2Services[service];
+    const client = getPassportEnv(
+      service.toUpperCase() as Uppercase<PassportAuthTypes>,
+    );
+    const { Strategy } = require(path);
+
+    const ServiceStrategyClass = PassportStrategy(Strategy, service);
+    const ServiceStrategy = new ServiceStrategyClass(
+      {
+        clientID: client.id,
+        clientSecret: client.secret,
+        callbackURL: client.callback,
+        scope: scope,
+      },
+      verify,
+    );
+
+    this.logger.execute(`Загружен сервис авторизации ${service}`);
+    StrategiesService.strategies.set(service, ServiceStrategy);
+    return ServiceStrategy;
+  }
+
+  private verify(service: PassportAuthTypes) {
+    return async (
+      ...[accessToken, refreshToken, profile, done]: Parameters<VerifyFunction>
+    ) => {
+      try {
+        const parameters = {
+          accessToken,
+          refreshToken,
+          profile,
+          name: service,
+        };
+
+        const signedInData =
+          await this.authStrategy.signInByService(parameters);
+        if (signedInData) {
+          return done(false, signedInData);
+        }
+
+        const signedUpData =
+          await this.authStrategy.signUpByService(parameters);
+        return done(false, signedUpData);
+      } catch (error) {
+        this.logger.error(error as Error);
+        return done(error, false);
+      }
+    };
+  }
+}
+```
+
+### Типы для конфигурации
+
+```typescript
+export type PassportAuthTypes = Exclude<AuthTypes, ExcludedAuthTypes>;
+// AuthTypes = 'google' | 'github' | 'telegram'
+
+export type OAuth2ServiceProperties = {
+  path: string;
+  scope: string[];
+};
+
+export type VerifyFunction = (
+  accessToken: string,
+  refreshToken: string,
+  profile: Profile,
+  done: VerifyCallback,
+) => void;
+```
+
+### Переменные окружения для провайдеров
+
+```typescript
+export const AUTH_DATA = [
+  "CLIENT_ID",
+  "CLIENT_SECRET",
+  "CALLBACK_URL",
+] as const;
+
+export const GROUPED_AUTH_PROPERTIES = {
+  GOOGLE: {
+    CLIENT_ID: "GOOGLE_CLIENT_ID",
+    CLIENT_SECRET: "GOOGLE_CLIENT_SECRET",
+    CALLBACK_URL: "GOOGLE_CALLBACK_URL",
+  },
+  GITHUB: {
+    CLIENT_ID: "GITHUB_CLIENT_ID",
+    CLIENT_SECRET: "GITHUB_CLIENT_SECRET",
+    CALLBACK_URL: "GITHUB_CALLBACK_URL",
+  },
+  // ... при добавлении нового провайдера сюда добавляется запись
+};
+```
+
+---
+
+## Что хорошо?
+
+### OCP в действии
+
+- Вся конфигурация провайдеров хранится в объекте `oauth2Services`.
+- `StrategiesService.execute()` проходит по ключам этого объекта и для каждого
+  создаёт стратегию.
+- Чтобы добавить новый провайдер, нужно:
+  1. Добавить запись в `oauth2Services` (путь к пакету и scope).
+  2. Добавить переменные окружения в `GROUPED_AUTH_PROPERTIES` (если ещё нет).
+  3. Убедиться, что в `.env` есть соответствующие переменные.
+- **Никакой код в `StrategiesService` не меняется** — он просто работает с
+  конфигурацией.
+
+### Паттерн «Стратегия»
+
+Каждый провайдер — это отдельная стратегия, которая инкапсулирует свою логику
+аутентификации. Основной сервис не знает деталей реализации каждой стратегии —
+он только вызывает её через единый интерфейс.
+
+### Централизованное управление
+
+Все провайдеры регистрируются в одном месте. Легко увидеть, какие провайдеры
+доступны, и при необходимости отключить какой-то (просто удалив запись из
+`oauth2Services`).
+
+### Тестируемость
+
+Стратегии можно тестировать изолированно, подставляя моки. А сам
+`StrategiesService` тестируется с фейковыми стратегиями.
+
+---
+
+## Как это работает
+
+1. При старте приложения `StrategiesService` в конструкторе вызывает
+   `this.execute()`.
+2. `execute()` перебирает ключи `oauth2Services` (google, github).
+3. Для каждого ключа вызывает `createStrategy()`, который:
+   - Загружает npm-пакет стратегии через `require(path)`.
+   - Получает из env клиентские данные через `getPassportEnv()`.
+   - Создаёт экземпляр стратегии с callback-функцией `verify`.
+   - Сохраняет стратегию в статический Map `StrategiesService.strategies`.
+4. В `AuthController` методы `auth()` и `callback()` используют
+   `PassportStrategy`, который вызывает `StrategiesService.getStrategy(method)`
+   и делегирует аутентификацию Passport.
+
+---
+
+## Пример расширения: добавляем VK
+
+Допустим, мы хотим добавить авторизацию через VK.
+
+### 1. Добавляем VK в `AuthTypes` (Prisma schema)
+
+```prisma
+enum AuthTypes {
+  google
+  github
+  telegram
+  vk
+}
+```
+
+(После изменения схемы нужно запустить `prisma generate` и миграцию.)
+
+### 2. Добавляем VK в `oauth2Services`
+
+```typescript
+const oauth2Services: Record<PassportAuthTypes, OAuth2ServiceProperties> = {
+  google: {
+    path: "passport-google-oauth20",
+    scope: ["openid", "profile", "email"],
+  },
+  github: { path: "passport-github", scope: [] },
+  vk: { path: "passport-vk", scope: ["email"] },
+};
+```
+
+### 3. Добавляем переменные окружения в `GROUPED_AUTH_PROPERTIES`
+
+```typescript
+export const GROUPED_AUTH_PROPERTIES = {
+  // ... существующие
+  VK: {
+    CLIENT_ID: "VK_CLIENT_ID",
+    CLIENT_SECRET: "VK_CLIENT_SECRET",
+    CALLBACK_URL: "VK_CALLBACK_URL",
+  },
+};
+```
+
+### 4. Добавляем переменные в `.env`
+
+```env
+VK_CLIENT_ID=your_vk_app_id
+VK_CLIENT_SECRET=your_vk_secret
+VK_CALLBACK_URL=https://your-domain.com/api/v1/auth/oauth2/vk/callback
+```
+
+### 5. Готово!
+
+- `StrategiesService` при старте подхватит VK автоматически.
+- Метод `auth()` в `AuthController` теперь принимает `method: "vk"`.
+- Пользователи могут авторизоваться через VK.
+
+**Что мы не трогали:**
+
+- `StrategiesService` (кроме добавления записи в `oauth2Services` — это
+  расширение).
+- `AuthController`, `PassportStrategy`, `AuthStrategy`, `AuthService`.
+- Все существующие стратегии.
+
+---
+
+## Почему это OCP, а не просто конфигурация?
+
+OCP требует, чтобы система была **открыта для расширения** и **закрыта для
+изменения**. В нашем случае:
+
+- **Расширение** — добавление нового провайдера через запись в конфигурации.
+- **Изменение** — правка кода, который уже работает.
+
+`StrategiesService` не требует изменений при добавлении провайдера, потому что
+он **читает конфигурацию и действует на основе неё**. Это классическая
+реализация паттерна «Стратегия» в сочетании с инверсией управления.
+
+Если бы мы использовали `if/else` по типу провайдера внутри `StrategiesService`,
+это было бы нарушением OCP. Но мы не используем — мы используем конфигурацию и
+динамическую загрузку.
+
+---
+
+## Связь с другими принципами
+
+- **DIP**: `StrategiesService` зависит от абстракции `OAuth2ServiceProperties` и
+  интерфейса стратегии, а не от конкретных реализаций.
+- **SRP**: `StrategiesService` отвечает только за создание и хранение стратегий.
+  Логика аутентификации вынесена в `AuthStrategy`, логика маршрутизации — в
+  `PassportStrategy` и `AuthController`.
+- **OCP**: Как мы показали, добавление нового провайдера не требует изменения
+  существующего кода.
+
+---
+
+## Итог
+
+`StrategiesService` — пример грамотного использования **конфигурации и
+динамической загрузки** для соблюдения OCP. Вместо жёстко зашитых провайдеров мы
+имеем перечень, который можно расширять, не переписывая логику.
+
+Такой подход позволяет легко подключать новые OAuth2-провайдеры, не боясь
+сломать существующую функциональность. Это делает систему гибкой и готовой к
+изменениям.
+
+> **Запомните:** Когда вы видите, что для добавления новой фичи нужно только
+> дописать конфигурацию, а код остаётся нетронутым — это признак хорошего OCP.
+> Стратегии, фабрики и инверсия управления — ваши главные союзники.
+
+---
+
+_Исходный код доступен в
+[репозитории feeldown-backend](https://github.com/FOCKUSTY/feeldown-backend/blob/8fc16b92f103e3c7adb92f011678194a4e979f0c)._

@@ -1,0 +1,267 @@
+# MetadataHandler
+
+Возьмём пример из `feeldown-backend` (ссылка вне зоны доступа).
+
+В проекте аутентификация построена на `AuthGuard`, который перед проверкой
+токена сначала проверяет метаданные эндпоинта — есть ли декораторы `@Public()`
+или `@SkipAuthGuard()`. Эта логика вынесена в отдельную цепочку обработчиков
+`MetadataHandler`, что делает код **открытым для расширения** и **закрытым для
+изменения** — идеальное соблюдение OCP.
+
+---
+
+## Код
+
+### MetadataHandler — диспетчер цепочки
+
+```typescript
+import type { MetadataHandlerType } from "@1/types";
+import type { ExecutionContext } from "@nestjs/common";
+
+import { Injectable } from "@nestjs/common";
+
+@Injectable()
+export class MetadataHandler implements MetadataHandlerType {
+  private readonly _handlers: MetadataHandlerType[] = [];
+
+  public constructor() {}
+
+  public apply(...handlers: MetadataHandlerType[]) {
+    this._handlers.push(...handlers);
+    return this;
+  }
+
+  public async execute(context: ExecutionContext) {
+    for (const handler of this._handlers) {
+      const validated = await handler.execute(context);
+      if (validated) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+}
+```
+
+### Обработчики метаданных
+
+```typescript
+import type { ExecutionContext } from "@nestjs/common";
+
+import { AbstractMetadataHandler } from "./abstract-metadata-handler";
+import { Injectable } from "@nestjs/common";
+import { Metadata } from "@/enums";
+
+@Injectable()
+export class PublicHandler extends AbstractMetadataHandler {
+  public async execute(context: ExecutionContext): Promise<boolean> {
+    const isPublic = this.get<boolean>(context, Metadata.isPublic);
+    return isPublic;
+  }
+}
+```
+
+```typescript
+import { AbstractMetadataHandler } from "./abstract-metadata-handler";
+import { ExecutionContext } from "@nestjs/common";
+import { Metadata } from "@/enums";
+
+export class SkipAuthGuardHandler extends AbstractMetadataHandler {
+  public async execute(context: ExecutionContext) {
+    const skipAuthGuard = this.get<boolean>(context, Metadata.skipAuthGuard);
+    return skipAuthGuard;
+  }
+}
+```
+
+### AuthGuard, который использует цепочку
+
+```typescript
+@Injectable()
+export class AuthGuard implements CanActivate {
+  public constructor(
+    private readonly service: AuthGuardService,
+    private readonly metadataHandler: MetadataHandler,
+    private readonly publicHandler: PublicHandler,
+    private readonly skipAuthGuardHandler: SkipAuthGuardHandler,
+  ) {}
+
+  public async canActivate(context: ExecutionContext): Promise<boolean> {
+    const metadataValidated = await this.validateMetadata(context);
+    if (metadataValidated) {
+      return true;
+    }
+
+    const request = context.switchToHttp().getRequest<Request>();
+    const validate = () => this.service.validateRequest(request);
+    const validated = tryCatchThrow(validate);
+    return validated;
+  }
+
+  private async validateMetadata(context: ExecutionContext) {
+    return this.metadataHandler
+      .apply(this.publicHandler, this.skipAuthGuardHandler)
+      .execute(context);
+  }
+}
+```
+
+---
+
+## Что хорошо?
+
+### OCP в действии
+
+- `AuthGuard` вызывает `metadataHandler.apply(...).execute()`.
+- В `apply` передаются конкретные обработчики.
+- Если появляется новый тип метаданных (например, `@Roles('admin')`), мы:
+  1. Создаём новый класс-обработчик, реализующий `MetadataHandlerType`.
+  2. Добавляем его в вызов `apply()`.
+  3. **Не трогаем** ни `AuthGuard`, ни `MetadataHandler`, ни существующие
+     обработчики.
+
+Это классический пример **открытости для расширения** (новые обработчики) и
+**закрытости для изменения** (существующий код не правится).
+
+### Чёткое разделение ответственности
+
+- `MetadataHandler` отвечает только за последовательный вызов обработчиков и
+  остановку при первом успешном.
+- Каждый обработчик отвечает только за проверку одного конкретного метаданных.
+- `AuthGuard` отвечает только за аутентификацию, но делегирует проверку
+  метаданных цепочке.
+
+### Легко тестировать
+
+Каждый обработчик тестируется изолированно. `MetadataHandler` тестируется с
+мок-обработчиками. `AuthGuard` тестируется с реальной цепочкой или заглушкой.
+
+---
+
+## Как это работает: паттерн «Цепочка обязанностей»
+
+`MetadataHandler` реализует упрощённый вариант паттерна **Chain of
+Responsibility**:
+
+- Обработчики выполняются последовательно.
+- Первый, кто возвращает `true`, прерывает цепочку.
+- Если ни один не вернул `true`, цепочка возвращает `false`.
+
+В `AuthGuard` это используется для «отключения» аутентификации на публичных
+маршрутах или маршрутах, помеченных `@SkipAuthGuard()`.
+
+---
+
+## Пример расширения: добавляем `@Roles()`
+
+Допустим, мы хотим добавить проверку ролей — эндпоинт доступен только
+пользователям с ролью `admin`.
+
+**1. Создаём декоратор `@Roles`:**
+
+```typescript
+import { SetMetadata } from "@nestjs/common";
+import { Metadata } from "@/enums";
+
+export const Roles = (...roles: string[]) => SetMetadata(Metadata.roles, roles);
+```
+
+**2. Добавляем новое значение в `Metadata` enum:**
+
+```typescript
+export const enum Metadata {
+  isPublic = "isPublic",
+  isOnlyMe = "isOnlyMe",
+  skipAuthGuard = "skipAuthGuard",
+  cacheDisabled = "cacheDisabled",
+  roles = "roles",
+}
+```
+
+**3. Создаём обработчик `RolesHandler`:**
+
+```typescript
+import type { ExecutionContext } from "@nestjs/common";
+import { AbstractMetadataHandler } from "./abstract-metadata-handler";
+import { Injectable } from "@nestjs/common";
+import { Metadata } from "@/enums";
+import { ServerUserService } from "@1/services";
+
+@Injectable()
+export class RolesHandler extends AbstractMetadataHandler {
+  public constructor(
+    protected readonly reflector: Reflector,
+    private readonly serverUserService: ServerUserService,
+  ) {
+    super(reflector);
+  }
+
+  public async execute(context: ExecutionContext): Promise<boolean> {
+    const requiredRoles = this.get<string[]>(context, Metadata.roles);
+    if (!requiredRoles || requiredRoles.length === 0) {
+      return false;
+    }
+
+    const request = context.switchToHttp().getRequest();
+    const user = await this.serverUserService.getByRequestOrThrow(request);
+    // Предположим, что у пользователя есть поле `role`
+    const hasRole = requiredRoles.includes(user.user.role);
+    return hasRole;
+  }
+}
+```
+
+**4. Добавляем `RolesHandler` в цепочку в `AuthGuard`:**
+
+```typescript
+private async validateMetadata(context: ExecutionContext) {
+  return this.metadataHandler
+    .apply(
+      this.publicHandler,
+      this.skipAuthGuardHandler,
+      this.rolesHandler,
+    )
+    .execute(context);
+}
+```
+
+**5. Теперь можно использовать `@Roles()` в контроллерах:**
+
+```typescript
+@Roles('admin')
+@Delete('/users/:id')
+public deleteUser(@Param('id') id: string) {
+  // только для админов
+}
+```
+
+**Что мы получили?**
+
+- Ни одной строчки в `AuthGuard` не изменили (кроме добавления `rolesHandler` в
+  `apply`, но это **расширение**, а не изменение).
+- `MetadataHandler`, `PublicHandler`, `SkipAuthGuardHandler` остались
+  нетронутыми.
+- Новый функционал добавлен через новый класс.
+
+---
+
+## Итог
+
+`MetadataHandler` — это эталонный пример **Open-Closed Principle**:
+
+- Код **открыт для расширения** через добавление новых обработчиков.
+- Код **закрыт для изменения** — существующие классы не трогаются при добавлении
+  новой функциональности.
+
+Такой подход делает систему гибкой, тестируемой и лёгкой в поддержке. Если в
+будущем понадобится новый тип метаданных (например, `@RateLimit()` или
+`@FeatureToggle()`), мы просто создадим ещё один обработчик — и всё.
+
+> **Запомните:** Если вы видите цепочки `if/else` по типу метаданных — это
+> признак нарушения OCP. Вместо этого используйте цепочку обработчиков, как в
+> `MetadataHandler`. Это сделает ваш код готовым к изменениям.
+
+---
+
+_Исходный код доступен в репозитории `feeldown-backend`._

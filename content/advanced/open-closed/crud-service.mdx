@@ -1,0 +1,337 @@
+# CrudService
+
+Возьмём пример из `feeldown-backend` (ссылка вне зоны доступа).
+
+`CrudService` — это абстрактный базовый класс, который предоставляет общие
+CRUD-методы для всех моделей базы данных. `UsersService`, `PostsService`,
+`NotificationsService` и другие наследуются от него, переопределяя типы и
+добавляя свою логику.
+
+Это классический пример **OCP через наследование**. Но у этой медали есть
+обратная сторона — **излишняя абстракция**, которая усложняет понимание и
+поддержку кода.
+
+---
+
+## Код
+
+### Базовый CrudService
+
+```typescript
+export abstract class CrudService<
+  ModelName extends PrismaModel,
+  Types extends FunctionsParameters<ModelName> = FunctionsParameters<ModelName>,
+  Add extends AdditionalFunctionsParameters<unknown> =
+    AdditionalFunctionsParameters,
+> {
+  public constructor(
+    protected readonly model: Model<ModelName>,
+    protected readonly modificators: Modificators<ModelName, Types, Add> = {},
+  ) {}
+
+  public async get<F extends Types["get"]>(
+    filter: F,
+    ...additional: Add["get"]
+  ): Promise<Prisma.Result<Model<ModelName>, F, "findMany">> {
+    const { sort, sortBy, limit, offset, where, include, omit, select } =
+      filter;
+    const whereClause = this.buildWhere({ where });
+    const modifiedWhere =
+      this.modificators.where?.get?.(filter, additional) || whereClause;
+
+    return this.model.findMany({
+      where: modifiedWhere,
+      orderBy: { [sortBy]: sort },
+      skip: offset,
+      take: limit,
+      include,
+      omit,
+      select,
+    });
+  }
+
+  public async getOne<W extends Types["getOne"]>(
+    where: W,
+    ...additional: Add["getOne"]
+  ): Promise<Prisma.Result<
+    Model<ModelName>,
+    { where: W },
+    "findUnique"
+  > | null> {
+    const modifiedWhere =
+      this.modificators.where?.getOne?.(where, additional) || where;
+    return this.model.findUnique({ where: modifiedWhere });
+  }
+
+  public async create(
+    data: Types["create"],
+  ): Promise<
+    Prisma.Result<Model<ModelName>, { data: Types["create"] }, "create">
+  > {
+    return this.model.create({ data });
+  }
+
+  // ... update, delete аналогично
+}
+```
+
+### Наследник: UsersService
+
+```typescript
+@Injectable()
+export class UsersService extends CrudService<
+  "User",
+  FunctionsParameters<"User"> & {
+    getOne: ResolvedUsernameSlug;
+    delete: { id: string };
+    update: [ResolvedUsernameSlug, UserUpdateDto];
+  }
+> {
+  public constructor(protected readonly prisma: PrismaService) {
+    super(prisma.user);
+  }
+}
+```
+
+### Наследник с дополнительной логикой: PostsService
+
+```typescript
+@Injectable()
+export class PostsService extends CrudService<
+  "Post",
+  CompareParameters<
+    "Post",
+    {
+      get: PostFilter;
+      getOne: ResolvedPostnameSlug;
+      create: PostCreateDto & { userId: string };
+      update: [ResolvedPostnameSlug, PostUpdateDto];
+    }
+  >,
+  CompareAdditional<{
+    update: [string];
+    delete: [string];
+  }>
+> {
+  public constructor(protected readonly prisma: PrismaService) {
+    super(prisma.post);
+  }
+
+  public async update(
+    where: ResolvedPostnameSlug,
+    data: PostUpdateDto,
+    userId: string,
+  ) {
+    await this.canUpdateOrThrow(where, userId);
+    return this.prisma.post.update({ where, data });
+  }
+
+  public async delete(where: { id: string }, userId: string) {
+    await this.canUpdateOrThrow(where, userId);
+    return this.prisma.post.delete({ where });
+  }
+
+  private async canUpdateOrThrow(
+    where: ResolvedPostnameSlug,
+    userId: string,
+  ): Promise<boolean> {
+    const post = await this.prisma.post.findUnique({ where });
+    if (!post) {
+      throw POST_ERRORS.POST_NOT_FOUND.exception;
+    }
+
+    if (post.userId !== userId) {
+      throw POST_ERRORS.NOT_ACCEPTABLE.exception;
+    }
+
+    return true;
+  }
+}
+```
+
+---
+
+## Что хорошо?
+
+### OCP через наследование
+
+- Базовый `CrudService` предоставляет общие методы.
+- Наследники могут:
+  - Использовать методы как есть (`UsersService`).
+  - Переопределять или расширять поведение (`PostsService` добавляет проверку
+    прав).
+- При добавлении новой модели (например, `CommentsService`) мы просто создаём
+  наследник, не трогая базовый класс.
+- Базовый класс **закрыт для изменений**, но **открыт для расширения**.
+
+### Единообразие
+
+Все сервисы работают через единый интерфейс. Это упрощает:
+
+- Понимание общей архитектуры.
+- Добавление новых фич (например, кэширования или логирования) в одном месте.
+
+---
+
+## Что плохо? (Цена абстракции)
+
+### Слишком высокий уровень абстракции
+
+Посмотри на типы в `CrudService`:
+
+```typescript
+export abstract class CrudService<
+  ModelName extends PrismaModel,
+  Types extends FunctionsParameters<ModelName> = FunctionsParameters<ModelName>,
+  Add extends AdditionalFunctionsParameters<unknown> =
+    AdditionalFunctionsParameters,
+> {
+  // ...
+}
+```
+
+Чтобы понять, что здесь происходит, нужно разобраться в куче типов:
+
+```typescript
+export type FunctionsParameters<ModelName extends PrismaModel> = {
+  get: FindMany<ModelName>;
+  getOne: WhereUnique<ModelName>;
+  create: CreateInput<ModelName>;
+  update: [Where<ModelName, "update">, UpdateInput<ModelName>];
+  delete: Where<ModelName, "delete">;
+};
+
+export type CompareParameters<
+  ModelName extends PrismaModel,
+  Types extends Partial<FunctionsParameters<ModelName>>,
+> = {
+  [P in keyof Types]-?: NonNullable<Types[P]>;
+} & Omit<FunctionsParameters<ModelName>, keyof Types>;
+```
+
+Это **усложняет чтение кода**. Новичку (или даже автору через пару месяцев)
+будет сложно быстро понять, что делает `CrudService` и как его использовать.
+
+### Универсальность = сложность
+
+`CrudService` пытается быть универсальным для всех моделей. Это приводит к:
+
+1. **Громоздкой типизации** — чтобы поддержать все варианты `where`, `select`,
+   `include`, нужно описывать сложные дженерики.
+2. **Ограничениям** — не все модели ведут себя одинаково. Например, у `User` нет
+   поля `postname`, а у `Post` есть. Это требует дополнительных типов-обёрток
+   (`CompareParameters`), что увеличивает когнитивную нагрузку.
+3. **Потере гибкости** — иногда нужно сделать что-то специфичное, что не
+   вписывается в общий интерфейс. Тогда приходится либо костылять, либо
+   отказываться от `CrudService`.
+
+### Пример проблемы: разный `where` для разных моделей
+
+- Для `User` в `getOne` мы используем `ResolvedUsernameSlug` (может быть id или
+  username).
+- Для `Post` в `getOne` используем `ResolvedPostnameSlug` (может быть id или
+  postname).
+- Для `Notification` в `getOne` используем просто `{ id: string }`.
+
+`CrudService` пытается это унифицировать через дженерики, но на практике:
+
+```typescript
+// UsersService
+public getOne(options: ResolvedUsernameSlug) {
+  // работает
+}
+
+// PostsService
+public getOne(where: ResolvedPostnameSlug) {
+  // работает
+}
+
+// Но оба используют один и тот же метод базового класса
+// с разными типами, что требует сложной системы типов
+```
+
+### Зачем это всё?
+
+На самом деле, большая часть этой сложности нужна только для того, чтобы:
+
+1. Передать `where` в `prisma.findUnique()`.
+2. Вернуть правильный тип результата.
+
+Можно было бы сделать проще — без дженериков, с явными методами в каждом
+сервисе. Но тогда мы потеряли бы единообразие и OCP.
+
+---
+
+## Альтернатива: простота вместо универсальности
+
+Если не гнаться за универсальностью, можно сделать проще:
+
+```typescript
+@Injectable()
+export class UsersService {
+  public constructor(private readonly prisma: PrismaService) {}
+
+  public async getOne(where: ResolvedUsernameSlug) {
+    return this.prisma.user.findUnique({ where });
+  }
+
+  public async update(where: ResolvedUsernameSlug, data: UserUpdateDto) {
+    return this.prisma.user.update({ where, data });
+  }
+
+  // ... остальные методы
+}
+```
+
+**Плюсы:**
+
+- Код простой и понятный.
+- Нет сложных дженериков.
+- Легко добавить специфичную логику.
+
+**Минусы:**
+
+- Дублирование кода (каждый сервис определяет свои CRUD-методы).
+- Изменение общей логики требует правки всех сервисов (нарушение OCP).
+- Нет единого интерфейса.
+
+---
+
+## Где баланс?
+
+`CrudService` — это компромисс между:
+
+- **Общностью** (OCP, единообразие)
+- **Простотой** (читаемость, лёгкость понимания)
+
+В данном проекте этот компромисс, вероятно, оправдан:
+
+- Много моделей (User, Post, Notification, FriendRequest, Follow, Block).
+- У всех есть стандартные CRUD-операции.
+- Команда готова терпеть сложность типов ради единообразия.
+
+Но это **не панацея**. Если бы моделей было 2–3, такой подход был бы избыточным.
+
+---
+
+## Итог
+
+`CrudService` — это пример **OCP через наследование**, который показывает:
+
+- **Плюсы:** единообразие, лёгкость расширения, централизованное изменение общей
+  логики.
+- **Минусы:** сложность типизации, снижение читаемости, ограничения для
+  нестандартных сценариев.
+
+> **Запомните:** Универсальность — это не всегда хорошо. Иногда лучше написать 3
+> простых класса, чем 1 сложный с дженериками. OCP — это принцип, а не догма.
+> Если абстракция усложняет код больше, чем помогает, возможно, стоит отказаться
+> от неё.
+
+В `CrudService` мы видим пример **умеренного нарушения KISS** ради соблюдения
+OCP и DRY. И это нормально — главное, чтобы решение было осознанным, а не
+навязанным.
+
+---
+
+_Исходный код доступен в репозитории `feeldown-backend`._

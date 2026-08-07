@@ -1,0 +1,480 @@
+# Notifications Emitters
+
+Возьмём пример из `feeldown-backend` (ссылка вне зоны доступа).
+
+В проекте есть система уведомлений, построенная на иерархии эмиттеров. Базовый
+класс содержит общую логику, а конкретные эмиттеры расширяют его для разных
+типов уведомлений. Это идеальный пример **OCP через наследование** — добавление
+нового типа уведомлений не требует изменения существующего кода.
+
+---
+
+## Код
+
+### Базовый класс: BaseNotificationsEmitter
+
+```typescript
+import type { Notification, NotificationCreateType } from "@1/types";
+import { Injectable } from "@nestjs/common";
+
+import { NOTIFICATIONS_ERRORS } from "@1/errors";
+import { PrismaService } from "@/database";
+
+@Injectable()
+export abstract class BaseNotificationsEmitter {
+  public constructor(protected readonly prisma: PrismaService) {}
+
+  protected create(data: NotificationCreateType): Promise<Notification> {
+    if (data.actorId === data.recipientId) {
+      throw NOTIFICATIONS_ERRORS.CANNOT_NOTIFY_SELF.exception;
+    }
+
+    return this.prisma.notification.create({ data });
+  }
+
+  protected delete(id: string): Promise<Notification> {
+    return this.prisma.notification.delete({ where: { id } });
+  }
+}
+```
+
+**Что здесь есть:**
+
+- Абстрактный класс (`abstract`) — его нельзя инстанциировать напрямую.
+- Общие методы `create` и `delete` — вся логика создания/удаления уведомлений в
+  одном месте.
+- Проверка `actorId !== recipientId` — защита от уведомления самого себя.
+- Зависимость от `PrismaService` внедряется через конструктор.
+
+**Единственная ответственность:** управление созданием и удалением уведомлений в
+БД.
+
+### Конкретный эмиттер: CommentNotificationsEmitter
+
+```typescript
+import type { Comment, Post } from "@1/types";
+import { NotificationType, ReferenceType } from "@1/types";
+
+import { BaseNotificationsEmitter } from "./base-notifications.emitter";
+import { Injectable } from "@nestjs/common";
+
+export type ActionToType = {
+  create: Post;
+  reply: Comment;
+};
+
+export type CommentAction = keyof ActionToType;
+
+@Injectable()
+export class CommentNotificationsEmitter extends BaseNotificationsEmitter {
+  public execute<Action extends CommentAction>(
+    comment: Comment,
+    parent: ActionToType[Action],
+  ) {
+    return this.emit<Action>(comment, parent);
+  }
+
+  private emit<Action extends CommentAction>(
+    comment: Comment,
+    parent: ActionToType[Action],
+  ) {
+    return this.create({
+      ...this.getTypes(parent),
+      actorId: comment.userId,
+      recipientId: parent.userId,
+      referenceId: parent.id,
+    });
+  }
+
+  private getTypes(parent: ActionToType[CommentAction]) {
+    if ("postname" in parent) {
+      return {
+        referenceType: ReferenceType.POST,
+        type: NotificationType.COMMENT_POST,
+      };
+    }
+
+    return {
+      referenceType: ReferenceType.COMMENT,
+      type: NotificationType.REPLY_COMMENT,
+    };
+  }
+}
+```
+
+**Что здесь происходит:**
+
+- Наследуется от `BaseNotificationsEmitter`.
+- Добавляет метод `execute`, который принимает комментарий и родительскую
+  сущность (пост или другой комментарий).
+- Метод `getTypes` определяет тип уведомления на основе того, является ли
+  родитель постом или комментарием.
+- Использует `this.create()` из базового класса для сохранения в БД.
+
+### Конкретный эмиттер: ReactionNotificationsEmitter
+
+```typescript
+import type { Comment, CommentReaction, Post, PostReaction } from "@1/types";
+import { NotificationType, ReferenceType } from "@1/types";
+
+import { BaseNotificationsEmitter } from "./base-notifications.emitter";
+import { Injectable } from "@nestjs/common";
+
+export type TargetToType = {
+  post: {
+    target: Post;
+    reaction: PostReaction;
+  };
+  comment: {
+    target: Comment;
+    reaction: CommentReaction;
+  };
+};
+
+export type ReactionTarget = keyof TargetToType;
+
+export const TARGET_TO_TYPE: Record<ReactionTarget, NotificationType> = {
+  comment: NotificationType.REACT_COMMENT,
+  post: NotificationType.REACT_POST,
+};
+
+@Injectable()
+export class ReactionNotificationsEmitter extends BaseNotificationsEmitter {
+  public execute<Target extends ReactionTarget>(
+    data: TargetToType[Target],
+    react: ReactionTarget,
+  ) {
+    return this.emit(data, react);
+  }
+
+  private emit<Target extends ReactionTarget>(
+    { reaction, target }: TargetToType[Target],
+    react: ReactionTarget,
+  ) {
+    return this.create({
+      actorId: reaction.userId,
+      recipientId: target.userId,
+      referenceId: target.id,
+      referenceType: ReferenceType.COMMENT,
+      type: TARGET_TO_TYPE[react],
+    });
+  }
+}
+```
+
+**Что здесь происходит:**
+
+- Наследуется от `BaseNotificationsEmitter`.
+- Добавляет метод `execute`, который принимает реакцию и цель (пост или
+  комментарий).
+- Использует маппинг `TARGET_TO_TYPE` для определения типа уведомления.
+- Снова использует `this.create()` из базового класса.
+
+### Конкретный эмиттер: FriendshipNotificationsEmitter
+
+```typescript
+import type { FriendRequest, FriendRequestStatus } from "@1/types";
+import { NotificationType, ReferenceType } from "@1/types";
+
+import { Injectable } from "@nestjs/common";
+
+import { BaseNotificationsEmitter } from "./base-notifications.emitter";
+import {
+  FRIENDSHIP_NOTIFICATIONS_ERRORS,
+  FRIENDSHIP_NOTIFICATIONS_SERVER_ERRORS,
+} from "@1/errors";
+
+const STATUS_TO_TYPE: Record<FriendRequestStatus, NotificationType | null> = {
+  ACCEPTED: NotificationType.FRIEND_ACCEPT,
+  PENDING: NotificationType.FRIEND_REQUEST,
+  REJECTED: null,
+};
+
+@Injectable()
+export class FriendshipNotificationsEmitter extends BaseNotificationsEmitter {
+  public execute(request: FriendRequest, status: FriendRequestStatus) {
+    if (request.status !== status) {
+      throw FRIENDSHIP_NOTIFICATIONS_ERRORS.REQUEST_STATUS_MISMATCH.execute({
+        requestStatus: request.status,
+        status,
+      });
+    }
+
+    const type = STATUS_TO_TYPE[status];
+    if (!type) {
+      throw FRIENDSHIP_NOTIFICATIONS_SERVER_ERRORS.BAD_STATUS_TYPE.exception;
+    }
+
+    return this.emit(request, type);
+  }
+
+  private emit(request: FriendRequest, type: NotificationType) {
+    return this.create({
+      actorId: request.senderId,
+      recipientId: request.receiverId,
+      referenceType: ReferenceType.FRIENDS,
+      referenceId: request.id,
+      type,
+    });
+  }
+}
+```
+
+**Что здесь происходит:**
+
+- Наследуется от `BaseNotificationsEmitter`.
+- Добавляет метод `execute`, который принимает запрос в друзья и новый статус.
+- Проверяет, что статус запроса соответствует переданному статусу.
+- Использует маппинг `STATUS_TO_TYPE` для определения типа уведомления.
+- Валидирует, что для статуса есть уведомление (например, для `REJECTED`
+  уведомление не отправляется).
+- Снова использует `this.create()` из базового класса.
+
+---
+
+## Что здесь хорошо с точки зрения OCP?
+
+### 1. Базовый класс закрыт для изменений
+
+`BaseNotificationsEmitter` содержит только общую логику:
+
+- Создание уведомления в БД.
+- Удаление уведомления из БД.
+- Проверка на уведомление самого себя.
+
+Эти методы **не меняются** при добавлении новых типов уведомлений.
+
+### 2. Конкретные эмиттеры открыты для расширения
+
+Каждый новый тип уведомления — это новый класс, наследующий
+`BaseNotificationsEmitter`:
+
+```typescript
+@Injectable()
+export class SystemNotificationEmitter extends BaseNotificationsEmitter {
+  public execute(userId: string, message: string) {
+    return this.create({
+      actorId: null, // системное уведомление
+      recipientId: userId,
+      referenceType: ReferenceType.SYSTEM,
+      referenceId: uuid(),
+      type: NotificationType.SYSTEM_MESSAGE,
+    });
+  }
+}
+```
+
+**Что мы не трогаем:**
+
+- `BaseNotificationsEmitter` — остаётся без изменений.
+- Другие эмиттеры (`CommentNotificationsEmitter`, `ReactionNotificationsEmitter`
+  и т.д.) — остаются без изменений.
+- Существующий код, который использует эмиттеры — остаётся без изменений.
+
+### 3. Единообразие через общий интерфейс
+
+Все эмиттеры имеют метод `execute` (или подобный), который принимает данные и
+создаёт уведомление. Это упрощает использование:
+
+```typescript
+// В любом месте кода
+await commentEmitter.execute(comment, post);
+await reactionEmitter.execute({ reaction, target }, "post");
+await friendshipEmitter.execute(request, FriendRequestStatus.ACCEPTED);
+```
+
+### 4. Каждый эмиттер отвечает за свою логику
+
+- `CommentNotificationsEmitter` — знает, как различать комментарий к посту и
+  ответ на комментарий.
+- `ReactionNotificationsEmitter` — знает, как различать реакцию на пост и
+  реакцию на комментарий.
+- `FriendshipNotificationsEmitter` — знает, какие статусы отправляют
+  уведомления, а какие нет.
+
+Ни один эмиттер не знает о логике других. Это также соблюдает **SRP**.
+
+### 5. Лёгкое тестирование
+
+Каждый эмиттер тестируется изолированно:
+
+```typescript
+// Тест для CommentNotificationsEmitter
+it('should create notification for comment on post', async () => {
+  const comment = { userId: 'user1', ... };
+  const post = { userId: 'user2', ... };
+  await emitter.execute(comment, post);
+  expect(prisma.notification.create).toHaveBeenCalledWith({
+    data: expect.objectContaining({
+      actorId: 'user1',
+      recipientId: 'user2',
+      type: NotificationType.COMMENT_POST,
+    }),
+  });
+});
+```
+
+---
+
+## Что можно было бы улучшить?
+
+Несмотря на то что текущая реализация хорошо соблюдает OCP, есть пара моментов,
+на которые стоит обратить внимание.
+
+### 1. `getTypes` в `CommentNotificationsEmitter` — проверка через `in`
+
+```typescript
+private getTypes(parent: ActionToType[CommentAction]) {
+  if ("postname" in parent) {
+    return {
+      referenceType: ReferenceType.POST,
+      type: NotificationType.COMMENT_POST,
+    };
+  }
+
+  return {
+    referenceType: ReferenceType.COMMENT,
+    type: NotificationType.REPLY_COMMENT,
+  };
+}
+```
+
+Сейчас используется проверка `"postname" in parent`. Это работает, потому что у
+модели `Post` есть поле `postname`, а у `Comment` его нет. Но это **неявное
+знание** о структуре моделей.
+
+**Почему это не идеально:**
+
+- Если в будущем у `Comment` появится поле `postname` (маловероятно, но
+  возможно), проверка сломается.
+- Код полагается на детали реализации моделей, а не на явное различие.
+
+**Альтернатива (если захочется сделать более явным):**
+
+```typescript
+type Parent =
+  | { kind: 'post'; data: Post }
+  | { kind: 'comment'; data: Comment };
+
+private getTypes(parent: Parent) {
+  if (parent.kind === 'post') {
+    return {
+      referenceType: ReferenceType.POST,
+      type: NotificationType.COMMENT_POST,
+    };
+  }
+
+  return {
+    referenceType: ReferenceType.COMMENT,
+    type: NotificationType.REPLY_COMMENT,
+  };
+}
+```
+
+**Однако** в текущей предметной области `Comment` никогда не будет иметь
+`postname`. Проверка через `in` — это **прагматичное решение**, которое работает
+и не требует усложнения. В данном случае KISS побеждает.
+
+> **Вывод:** проверка через `in` — это ok, но если в будущем модельная логика
+> изменится, стоит перейти на дискриминирующий юнион.
+
+### 2. Маппинг статусов в `FriendshipNotificationsEmitter`
+
+```typescript
+const STATUS_TO_TYPE: Record<FriendRequestStatus, NotificationType | null> = {
+  ACCEPTED: NotificationType.FRIEND_ACCEPT,
+  PENDING: NotificationType.FRIEND_REQUEST,
+  REJECTED: null,
+};
+```
+
+Это статический объект-маппинг. Если появится новый статус (например,
+`BLOCKED`), его нужно будет добавить сюда.
+
+**Но это не нарушение OCP!**
+
+Почему:
+
+- Это **конфигурация**, а не бизнес-логика.
+- Добавление новой записи в объект — это **расширение**, а не изменение
+  существующего поведения.
+- Класс `FriendshipNotificationsEmitter` не требует правки — он просто читает из
+  `STATUS_TO_TYPE`.
+- Точно такой же подход используется в `StrategiesService` с `oauth2Services`, и
+  мы назвали это **хорошим примером OCP**.
+
+**Когда это стало бы нарушением:**
+
+- Если бы внутри метода `execute` была цепочка `if/else` по статусам.
+- Если бы для добавления нового статуса нужно было менять логику метода.
+
+В текущей реализации достаточно просто добавить запись в `STATUS_TO_TYPE` — и
+всё заработает. Это **открытость для расширения** через конфигурацию.
+
+> **Вывод:** статический маппинг — это нормальный и даже предпочтительный
+> способ, если он не требует изменения логики при добавлении новых значений.
+
+### 3. (Реальное улучшение) Общий интерфейс для эмиттеров
+
+Сейчас каждый эмиттер имеет свой метод `execute` с разной сигнатурой:
+
+```typescript
+// CommentNotificationsEmitter
+public execute(comment: Comment, parent: Post | Comment): Promise<Notification>
+
+// ReactionNotificationsEmitter
+public execute(data: ReactionData, react: ReactionTarget): Promise<Notification>
+
+// FriendshipNotificationsEmitter
+public execute(request: FriendRequest, status: FriendRequestStatus): Promise<Notification>
+```
+
+Это **не нарушает OCP**, но усложняет использование в обобщённом коде. Если бы
+мы захотели вызвать все эмиттеры из одного места, пришлось бы использовать `any`
+или условные операторы.
+
+**Можно сделать (если нужно):**
+
+```typescript
+interface NotificationEmitter<T> {
+  execute(data: T): Promise<Notification>;
+}
+```
+
+Тогда каждый эмиттер реализует свой тип данных. Но в текущей архитектуре это
+избыточно — каждый эмиттер используется в своём контексте.
+
+> **Вывод:** общий интерфейс не обязателен, если каждый эмиттер живёт в своём
+> домене. Это вопрос дизайна, а не нарушения OCP.
+
+Основные выводы по улучшениям:
+
+1. **Проверка через `in`** — прагматичное решение, которое работает и не требует
+   усложнения.
+2. **Статический маппинг** — это не нарушение OCP, а пример хорошей
+   конфигурации.
+3. **Общий интерфейс** — может быть полезен, но не обязателен для соблюдения
+   OCP.
+
+---
+
+## Итог
+
+Папка `notifications/emitters` — это пример хорошо спроектированной системы,
+где:
+
+- **OCP соблюдён** — базовый класс закрыт для изменений, конкретные эмиттеры
+  открыты для расширения.
+- **SRP соблюдён** — каждый класс отвечает за свою зону ответственности.
+- **DRY соблюдён** — общая логика вынесена в базовый класс.
+- **Легко тестировать** — каждый эмиттер тестируется изолированно.
+- **Легко расширять** — добавление нового типа уведомления требует только
+  создания нового класса.
+
+> **Запомните:** Когда вы видите иерархию классов, где базовый класс содержит
+> общую логику, а наследники — специфичную, это часто признак хорошего OCP.
+> Главное — чтобы базовый класс не менялся при добавлении новых наследников.
+
+---
+
+_Исходный код доступен в репозитории `feeldown-backend`._

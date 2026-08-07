@@ -1,0 +1,354 @@
+# Конфигурируемые классы
+
+Возьмём примеры из `feeldown-backend`.
+
+- SlugPipe (ссылка вне зоны доступа)
+- [Routes](https://github.com/FOCKUSTY/feeldown-backend/blob/8fc16b92f103e3c7adb92f011678194a4e979f0c/src/utils/routes.utils.ts)
+- [Enumeration](https://github.com/FOCKUSTY/feeldown-backend/blob/8fc16b92f103e3c7adb92f011678194a4e979f0c/src/utils/enumeration.utils.ts)
+
+В проекте есть несколько утилит, которые демонстрируют OCP на разных уровнях:
+
+- **`SlugPipe`** — парсинг slug-строк с поддержкой разных префиксов.
+- **`Routes`** — генерация конфигурации маршрутов.
+- **`Enumeration`** — работа с enum-подобными объектами.
+
+Каждая из них показывает свой подход к соблюдению OCP: через **конфигурацию**,
+через **наследование** и через **фабрику**.
+
+---
+
+## 1. SlugPipe: парсинг с поддержкой префиксов
+
+### Код
+
+```typescript
+import type { ResolvedSlug, ResolvedUsernameSlug } from "@1/types";
+import type { PrefixKeys } from "@1/enums";
+
+import { Prefix } from "@1/enums";
+import { Injectable, PipeTransform } from "@nestjs/common";
+import { UsernamePipe } from "./username.pipe";
+
+@Injectable()
+export class SlugPipe<T extends PrefixKeys> implements PipeTransform {
+  private readonly _prefix: Prefix;
+  private readonly _type: T;
+
+  public constructor(type: T) {
+    this._type = type;
+    this._prefix = Prefix[type];
+  }
+
+  public transform(value: string): ResolvedSlug<T> {
+    if (value.startsWith(this._prefix)) {
+      const name = value.slice(1);
+      const validatedName = UsernamePipe.validate(name);
+      return this.resolveName(validatedName);
+    }
+    return this.resolveId(value);
+  }
+
+  private resolveId(id: string) {
+    return { id, [this._type]: undefined } as ResolvedSlug<T>;
+  }
+
+  private resolveName(name: string) {
+    return { id: undefined, [this._type]: name } as ResolvedSlug<T>;
+  }
+}
+
+@Injectable()
+export class UsernameSlugPipe extends SlugPipe<"username"> {
+  public constructor() {
+    super("username");
+  }
+}
+
+@Injectable()
+export class PostnameSlugPipe extends SlugPipe<"postname"> {
+  public constructor() {
+    super("postname");
+  }
+}
+```
+
+### Конфигурация префиксов
+
+```typescript
+import { Enumeration } from "@/utils/enumeration.utils";
+
+const PrefixEnumeration = new Enumeration({
+  username: "@",
+  postname: "$",
+});
+
+export const Prefix = PrefixEnumeration.enumeration;
+export type PrefixKeys = keyof typeof Prefix;
+```
+
+---
+
+## Что здесь хорошо?
+
+### OCP через конфигурацию
+
+`SlugPipe` — это **дженерик-класс**, который принимает тип
+`T extends PrefixKeys`. Вся логика основана на конфигурации `Prefix`:
+
+```typescript
+this._prefix = Prefix[type];
+```
+
+**Что происходит при добавлении нового префикса:**
+
+1. Добавляем запись в `Prefix`:
+
+```typescript
+const PrefixEnumeration = new Enumeration({
+  username: "@",
+  postname: "$",
+  postid: "#",
+});
+```
+
+2. Создаём новый наследник `SlugPipe`:
+
+```typescript
+@Injectable()
+export class PostIdSlugPipe extends SlugPipe<"postid"> {
+  public constructor() {
+    super("postid");
+  }
+}
+```
+
+**Что не трогаем:**
+
+- `SlugPipe` — он универсален и работает с любым префиксом.
+- Существующие реализации (`UsernameSlugPipe`, `PostnameSlugPipe`).
+- Клиентский код, использующий старые типы.
+
+### Чистое разделение ответственности
+
+- `SlugPipe` — общая логика парсинга.
+- Конкретные классы — просто указывают тип.
+- `Prefix` — конфигурация префиксов.
+
+Это также **DRY** — не нужно копировать логику для каждого типа.
+
+---
+
+## 2. Routes: генерация маршрутов с типами
+
+### Код
+
+```typescript
+import type { Operations, Path, RoutesObject } from "@/types";
+
+type ConstructorData<R extends RoutesObject, P extends Path> = {
+  route: P;
+  routes: R;
+  operations: Operations<R>;
+};
+
+export class Routes<const R extends RoutesObject, const P extends Path> {
+  public constructor(private readonly data: ConstructorData<R, P>) {}
+
+  public execute() {
+    return {
+      ROUTE: this.data.route,
+      ROUTES: this.data.routes,
+      OPERATIONS: this.data.operations,
+    } as const;
+  }
+}
+```
+
+### Использование в контроллерах
+
+```typescript
+export const { ROUTE, ROUTES, OPERATIONS } = new Routes({
+  route: "users",
+  routes: {
+    GET_ONE: "/:slug",
+    PUT: "/:slug",
+    PATCH: "/:slug",
+    DELETE: "/:id",
+  },
+  operations: {
+    GET_ONE: { summary: "Getting a user by slug" },
+    PUT: { summary: "Updating a user" },
+    PATCH: { summary: "Updating a user" },
+    DELETE: { summary: "Deleting a user" },
+  },
+}).execute();
+```
+
+---
+
+## Что здесь хорошо?
+
+### OCP через конфигурацию и дженерики
+
+`Routes` — это **фабрика**, которая принимает конфигурацию и возвращает строго
+типизированные константы.
+
+**Что происходит при добавлении нового маршрута:**
+
+1. Добавляем запись в `routes`.
+2. Добавляем соответствующую операцию в `operations`.
+
+**Что не трогаем:**
+
+- Класс `Routes` — он универсален.
+- Существующие конфигурации маршрутов.
+- Контроллеры, использующие старые маршруты.
+
+### Типобезопасность
+
+```typescript
+// TypeScript выведет точные типы
+const { ROUTE, ROUTES, OPERATIONS } = Routes(...).execute();
+// ROUTE: "users"
+// ROUTES.GET_ONE: "/:slug"
+// OPERATIONS.GET_ONE: { summary: "Getting a user by slug" }
+```
+
+### Единообразие
+
+Все маршруты в проекте используют один и тот же подход:
+
+- `USERS_ROUTES`
+- `POSTS_ROUTES`
+- `NOTIFICATIONS_ROUTES`
+
+Это упрощает поддержку и онбординг новых разработчиков.
+
+---
+
+## 3. Enumeration: работа с enum-объектами
+
+### Код
+
+```typescript
+export class Enumeration<const T extends Readonly<Record<string, string>>> {
+  public readonly keys: readonly (keyof T)[];
+  public readonly values: readonly T[keyof T][];
+  public readonly entries: [keyof T, T[keyof T]][];
+  public readonly type: T[keyof T];
+
+  public constructor(public readonly enumeration: T) {
+    this.keys = Object.keys(this.enumeration) as readonly (keyof T)[];
+    this.entries = Object.entries(this.enumeration) as any;
+    this.values = Object.values(this.enumeration) as readonly T[keyof T][];
+    this.type = this.values[0];
+  }
+
+  public isValidValue<Value extends string>(value: Value): value is T[keyof T] {
+    return (this.values as readonly string[]).includes(value);
+  }
+
+  public isValidKey<Key extends string>(key: Key): key is keyof T {
+    return key in this.enumeration;
+  }
+
+  public getKey(value: T[keyof T]): keyof T {
+    const entry = this.entries.find(([, v]) => v === value);
+    if (!entry) {
+      throw new Error(`Value "${value}" not found in enumeration`);
+    }
+    return entry[0];
+  }
+
+  public revert(): Enumeration<{ [K in T[keyof T]]: keyof T }> {
+    // Создаёт обратный enum
+  }
+}
+```
+
+### Использование
+
+```typescript
+import { Enumeration } from "@/utils";
+import { FriendRequestStatus } from "@1/types";
+
+export const UpdateFriendshipEnumeration = new Enumeration({
+  ACCEPTED: FriendRequestStatus.ACCEPTED,
+  REJECTED: FriendRequestStatus.REJECTED,
+});
+
+export const UpdateFriendship = UpdateFriendshipEnumeration.enumeration;
+export type UpdateFriendship = typeof UpdateFriendshipEnumeration.type;
+
+export class FriendshipUpdateDto {
+  @IsEnum(UpdateFriendship)
+  status: UpdateFriendship;
+}
+```
+
+---
+
+## Что здесь хорошо?
+
+### OCP через фабрику
+
+`Enumeration` — это **фабрика**, которая создаёт enum-подобные объекты с
+дополнительными методами.
+
+**Что происходит при добавлении нового enum:**
+
+1. Создаём новый экземпляр `Enumeration` с нужными значениями.
+2. Экспортируем тип и объект.
+
+**Что не трогаем:**
+
+- Класс `Enumeration` — он универсален.
+- Существующие enum-объекты.
+- Клиентский код, использующий старые enum'ы.
+
+### Добавленная функциональность
+
+`Enumeration` добавляет полезные методы, которых нет у обычных объектов:
+
+- `isValidValue()` — проверка, что значение существует.
+- `isValidKey()` — проверка, что ключ существует.
+- `getKey()` — получение ключа по значению.
+- `revert()` — обратный enum (значение → ключ).
+
+### Типобезопасность
+
+```typescript
+const enum_ = new Enumeration({ A: "a", B: "b" });
+type Keys = keyof typeof enum_.enumeration; // "A" | "B"
+type Values = typeof enum_.type; // "a" | "b"
+```
+
+---
+
+## Общий итог
+
+Эти три утилиты показывают разные подходы к OCP:
+
+| Утилита       | Подход                   | Что открыто для расширения                             |
+| ------------- | ------------------------ | ------------------------------------------------------ |
+| `SlugPipe`    | Дженерики + конфигурация | Новые типы slug через добавление префикса и наследника |
+| `Routes`      | Фабрика + конфигурация   | Новые маршруты через добавление записей в конфигурацию |
+| `Enumeration` | Фабрика                  | Новые enum-объекты через создание экземпляра           |
+
+**Общие черты:**
+
+- **Все три закрыты для изменения** — их код не меняется при добавлении новых
+  сущностей.
+- **Все три открыты для расширения** — новые сущности добавляются через
+  конфигурацию или наследование.
+- **Все три типобезопасны** — TypeScript выводит точные типы.
+- **Все три следуют DRY** — общая логика вынесена в один класс.
+
+> **Запомните:** OCP работает на всех уровнях — от архитектуры целых сервисов до
+> маленьких утилит. Используйте дженерики, конфигурацию и фабрики, чтобы сделать
+> ваш код расширяемым без изменения существующей логики.
+
+---
+
+_Исходный код доступен в
+[репозитории feeldown-backend](https://github.com/FOCKUSTY/feeldown-backend/blob/8fc16b92f103e3c7adb92f011678194a4e979f0c)._

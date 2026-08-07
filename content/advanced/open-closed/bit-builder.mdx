@@ -1,0 +1,348 @@
+# BitBuilder
+
+Возьмём пример из
+[bit-field](https://github.com/FOCKUSTY/bit-field/blob/953d4af0e7f312c12050202dd73b89e25d3d24eb/src/bit-builder.ts).
+
+`BitBuilder` — это класс, который генерирует битовые значения для списка имён с
+автоматическим смещением. У него есть два статических метода: `fromConfig` и
+`fromData`, которые делают почти одно и то же, но с разными подходами. Это
+отличный пример того, как **универсальный интерфейс** может быть **закрыт для
+изменений**, но при этом **открыт для расширения** через разные сценарии
+использования.
+
+---
+
+## Код
+
+### Основной класс BitBuilder
+
+```typescript
+export class BitBuilder<const T extends string> {
+  /**
+   * Генерирует набор битовых значений для списка имён с автоматическим смещением.
+   */
+  public constructor(public readonly bits: MaybeReadonly<T[]>) {}
+
+  /**
+   * Генерирует объект с битовыми значениями для каждого имени из `bits`.
+   */
+  public execute(data?: Partial<BuilderBitData<T>>): Record<T, bigint> {
+    const bits = this.bits.map((bit, index) => {
+      const computedBit = this.computeBit({
+        bit,
+        index,
+        offset: ZERO_BIT,
+        exclude: [],
+        ...(data || {}),
+      });
+      return [bit, computedBit];
+    });
+    return Object.fromEntries(bits);
+  }
+
+  private computeBit({
+    bit,
+    exclude,
+    index,
+    offset,
+    include,
+  }: {
+    bit: T;
+    index: number;
+  } & BuilderBitData<T>): bigint {
+    const modifier = this.resolveOffset(offset) + BigInt(index);
+    const excluded = exclude.includes(bit);
+    const included = include ? include.includes(bit) : true;
+
+    if (excluded || !included) {
+      return ZERO_BIT;
+    }
+    return ONE_BIT << modifier;
+  }
+
+  private resolveOffset(offset: bigint | BigIntRecord): bigint {
+    if (typeof offset === "bigint") {
+      return offset;
+    }
+    const keys = Object.keys(offset);
+    if (keys.length === 0) {
+      return ZERO_BIT;
+    }
+    const bits = keys.map((key) => offset[key]);
+    const maxBit = BitFieldOperations.max(...bits);
+    if (maxBit === ZERO_BIT) {
+      return ZERO_BIT;
+    }
+    return BitFieldOperations.logarithm2(maxBit) + ONE_BIT;
+  }
+}
+```
+
+### Статические фабричные методы
+
+```typescript
+export class BitBuilder<const T extends string> {
+  /**
+   * Создаёт конфигурацию битов для нескольких категорий.
+   * Каждая категория обрабатывается последовательно со своим смещением.
+   */
+  public static fromConfig<const Config extends DefaultConfig>(
+    config: Config,
+  ): BitConfig<Config> {
+    let offset: bigint = ZERO_BIT;
+    const keys = Object.keys(config) as (keyof Config)[];
+    const bitConfig = {
+      available: {},
+      default: {},
+      raw: {},
+    } as BitConfig<Config>;
+
+    for (const key of keys) {
+      const { include, exclude } = config[key];
+      if (include.some((permission) => exclude.includes(permission))) {
+        throw new Error("Intersection was found.");
+      }
+
+      const all = [...include, ...exclude];
+      const builder = new BitBuilder(all);
+      const availableBits = builder.execute({ offset });
+      const defaultBits = builder.execute({ offset, exclude });
+
+      bitConfig.available[key] = availableBits;
+      bitConfig.default[key] = defaultBits;
+      bitConfig.raw[key] = all;
+
+      const maxBit = BitFieldOperations.max(...Object.values(availableBits));
+      if (maxBit !== ZERO_BIT) {
+        offset = BitFieldOperations.logarithm2(maxBit) + ONE_BIT;
+      }
+    }
+    return bitConfig;
+  }
+
+  /**
+   * Создаёт битовые значения для одного набора данных (категории).
+   */
+  public static fromData<
+    const Include extends string[],
+    const Exclude extends string[],
+  >(data: StaticBuilderBitData<Include, Exclude>) {
+    const all = [...data.include, ...data.exclude];
+    const bitBuilder = new BitBuilder(all);
+    const availableBits = bitBuilder.execute({ offset: data.offset });
+    const defaultBits = bitBuilder.execute({
+      offset: data.offset,
+      exclude: data.exclude,
+    });
+
+    return {
+      all,
+      include: data.include,
+      exclude: data.exclude,
+      bitBuilder,
+      available: availableBits,
+      default: defaultBits,
+    } as const;
+  }
+}
+```
+
+### Использование в клиентском коде
+
+```typescript
+const rights = {
+  user: { include: ["VIEW", "EDIT"], exclude: ["DELETE"] },
+  admin: { include: ["VIEW", "EDIT", "DELETE"], exclude: [] },
+};
+
+const bits = BitBuilder.fromConfig(rights);
+// bits.available.user: { VIEW: 1n<<0n, EDIT: 1n<<1n, DELETE: 1n<<2n }
+// bits.default.user:   { VIEW: 1n<<0n, EDIT: 1n<<1n, DELETE: 0n }
+// bits.raw.user:       ["VIEW", "EDIT", "DELETE"]
+
+const permissions = BitBuilder.resolveConfig(bits);
+// permissions.available.user === 7n
+// permissions.default.user   === 3n
+```
+
+---
+
+## Что здесь хорошо с точки зрения OCP?
+
+### 1. Единый движок генерации
+
+`BitBuilder` имеет **один внутренний механизм** (`execute` + `computeBit`),
+который отвечает за всю логику вычисления битов. Это закрытая для изменений
+часть:
+
+```typescript
+public execute(data?: Partial<BuilderBitData<T>>): Record<T, bigint> {
+  // Единственная реализация логики
+}
+```
+
+**Что не меняется:**
+
+- Алгоритм вычисления смещения.
+- Логика включения/исключения битов.
+- Формат возвращаемого объекта.
+
+### 2. Разные публичные интерфейсы для разных сценариев
+
+Вместо того чтобы заставлять пользователя разбираться в сложных параметрах,
+`BitBuilder` предоставляет **два простых статических метода**:
+
+| Метод        | Сценарий использования                                                        |
+| ------------ | ----------------------------------------------------------------------------- |
+| `fromConfig` | Несколько категорий с автоматическим смещением (например, роли пользователей) |
+| `fromData`   | Одна категория с ручным управлением (например, права доступа)                 |
+
+**Что мы получаем:**
+
+- Каждый метод решает свою задачу.
+- Пользователь не думает о внутренней сложности.
+- Добавление нового сценария = новый статический метод.
+
+### 3. Открытость для новых сценариев
+
+Если появится новый сценарий (например, генерация битов для иерархии с
+наследованием), мы можем добавить новый статический метод:
+
+```typescript
+public static fromHierarchy<Config extends DefaultConfig>(
+  config: Config,
+  inheritance: Record<keyof Config, keyof Config>
+): BitConfig<Config> {
+  // Логика с наследованием
+}
+```
+
+**Что не трогаем:**
+
+- `BitBuilder` (основной класс).
+- `fromConfig`.
+- `fromData`.
+- `execute`.
+
+### 4. Чёткое разделение ответственности
+
+- **`BitBuilder`** — движок генерации битов.
+- **`fromConfig`** — конфигурация для нескольких категорий.
+- **`fromData`** — конфигурация для одной категории.
+- **`resolveConfig`** — преобразование битов в числа.
+
+Каждый статический метод — это отдельная "точка входа" в систему, которая
+использует общий движок.
+
+### 5. Единый формат результата
+
+Несмотря на разные входные данные, все методы возвращают согласованный формат —
+объекты с ключами-именами и значениями-битами. Это позволяет использовать их в
+одном контексте.
+
+---
+
+## Что можно было бы улучшить?
+
+### 1. `fromData` возвращает слишком много данных
+
+```typescript
+return {
+  all,
+  include,
+  exclude,
+  bitBuilder, // ❌ зачем возвращать сам билдер?
+  available: availableBits,
+  default: defaultBits,
+} as const;
+```
+
+**Почему это проблема:**
+
+- Возвращение `bitBuilder` нарушает инкапсуляцию — пользователь может
+  использовать его напрямую, обходя фабричный метод.
+- Это создаёт **два способа делать одно и то же**.
+- Если логика генерации изменится, пользователь может продолжать использовать
+  старый билдер.
+
+**Как исправить:**
+
+```typescript
+return {
+  all,
+  include,
+  exclude,
+  available: availableBits,
+  default: defaultBits,
+} as const;
+```
+
+Или сделать билдер приватным:
+
+```typescript
+private static createBuilder(all: string[]) {
+  return new BitBuilder(all);
+}
+```
+
+### 2. `fromConfig` и `fromData` дублируют логику
+
+Оба метода делают похожие вещи:
+
+1. Создают `BitBuilder` с массивом имён.
+2. Вызывают `execute` с параметрами.
+3. Формируют результат.
+
+Можно было бы вынести общую логику в приватный метод:
+
+```typescript
+private static generateBits(
+  names: string[],
+  options: { offset: bigint; exclude?: string[] }
+) {
+  const builder = new BitBuilder(names);
+  return builder.execute(options);
+}
+```
+
+Тогда оба метода стали бы тоньше:
+
+```typescript
+public static fromConfig(config) {
+  // ... вычисление offset для каждой категории
+  const availableBits = this.generateBits(all, { offset });
+  const defaultBits = this.generateBits(all, { offset, exclude });
+  // ...
+}
+
+public static fromData(data) {
+  const all = [...data.include, ...data.exclude];
+  const availableBits = this.generateBits(all, { offset: data.offset });
+  const defaultBits = this.generateBits(all, { offset: data.offset, exclude: data.exclude });
+  // ...
+}
+```
+
+Но это уже вопрос **DRY**, а не OCP — текущая реализация всё равно соблюдает
+принцип.
+
+---
+
+## Итог
+
+`BitBuilder` — пример грамотного дизайна, где:
+
+- **Базовый класс закрыт для изменений** — логика генерации не меняется.
+- **Статические методы открыты для расширения** — можно добавлять новые
+  сценарии.
+- **Пользователь получает простые интерфейсы** для разных задач.
+- **Единый движок** обеспечивает согласованность поведения.
+
+> **Запомните:** Когда вы видите класс с одним внутренним механизмом и
+> несколькими публичными методами-фабриками, это часто признак хорошего OCP.
+> Каждый новый метод — это расширение, а не изменение существующего кода.
+
+---
+
+_Исходный код доступен в репозитории
+[bit-field](https://github.com/FOCKUSTY/bit-field/tree/953d4af0e7f312c12050202dd73b89e25d3d24eb)._

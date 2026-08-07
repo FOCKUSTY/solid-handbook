@@ -1,0 +1,364 @@
+# IEventPublisher
+
+Возьмём пример из
+[CsTestShop](https://github.com/FOCKUSTY/CsTestShop/blob/cc42c6f594b410cb0f7d46b51f0dd7f04d2649df/Interfaces/Events/IEvent.cs)
+
+В проекте есть интерфейс `IEventPublisher`, который отвечает за публикацию
+событий в Kafka. На первый взгляд — удобная абстракция. Но при ближайшем
+рассмотрении он нарушает **Open-Closed Principle** — каждое новое событие
+требует изменения интерфейса и всех его реализаций.
+
+---
+
+## Код
+
+### Интерфейс IEventPublisher
+
+```csharp
+public interface IEventPublisher
+{
+  Task PublishOrderCreated(OrderCreatedEvent @event);
+  Task PublishProductUpdated(ProductUpdatedEvent @event);
+}
+```
+
+### Реализация: KafkaEventPublisher
+
+```csharp
+public class KafkaEventPublisher : IEventPublisher
+{
+  private readonly IProducer<string, string> _producer;
+  private readonly string _order_created_topic = Fenvironment.ORDER_CREATED_TOPIC();
+  private readonly string _product_updated_topic = Fenvironment.PRODUCT_UPDATED_TOPIC();
+
+  public KafkaEventPublisher()
+  {
+    var config = new ProducerConfig
+    {
+      BootstrapServers = Fenvironment.KAFKA_BOOTSTRAP_SERVERS(),
+    };
+    _producer = new ProducerBuilder<string, string>(config).Build();
+  }
+
+  public async Task PublishOrderCreated(OrderCreatedEvent @event)
+  {
+    var content = JsonSerializer.Serialize(@event);
+    var message = new Message<string, string>
+    {
+      Key = @event.OrderId.ToString(),
+      Value = content,
+    };
+    await _producer.ProduceAsync(_order_created_topic, message);
+  }
+
+  public async Task PublishProductUpdated(ProductUpdatedEvent @event)
+  {
+    var content = JsonSerializer.Serialize(@event);
+    var message = new Message<string, string>
+    {
+      Key = @event.ProductId.ToString(),
+      Value = content,
+    };
+    await _producer.ProduceAsync(_product_updated_topic, message);
+  }
+}
+```
+
+### Использование в роутерах
+
+```csharp
+[Authorize]
+public class OrderRouter : Orderer.OrdererBase
+{
+  private readonly IEventPublisher _eventPublisher;
+
+  public OrderRouter(IEventPublisher eventPublisher)
+  {
+    _eventPublisher = eventPublisher;
+  }
+
+  public override async Task<OrderReply> CreateOrder(CreateOrderRequest request, ServerCallContext context)
+  {
+    // ... создание заказа
+
+    OrderCreatedEvent @event = new()
+    {
+      OrderId = order.Id,
+      UserId = order.UserId,
+      TotalAmount = order.TotalAmount,
+      Items = order.Items.ToList(),
+    };
+    await _eventPublisher.PublishOrderCreated(@event);
+
+    return CreateReply(order);
+  }
+}
+```
+
+---
+
+## Что здесь не так?
+
+### OCP нарушен
+
+Каждый раз, когда появляется новое событие, нужно:
+
+1. Добавить метод в интерфейс `IEventPublisher`.
+2. Добавить реализацию в `KafkaEventPublisher`.
+3. (Если есть другие реализации — добавить и там).
+
+Это прямое нарушение **Open-Closed Principle**:
+
+- Класс **не закрыт для изменения** — при добавлении нового события мы вынуждены
+  менять существующий код.
+- Интерфейс **не открыт для расширения** — нельзя добавить новое событие без
+  модификации интерфейса.
+
+### Доказательство: документация vs реальность
+
+В `DOCUMENTATION.md` упоминаются события:
+
+- `order-created`
+- `product-updated`
+- `user-created`
+- `user-deleted`
+
+Но в коде реализованы только первые два. `UserCreated` и `UserDeleted`
+закомментированы в интерфейсе или вообще отсутствуют:
+
+```csharp
+// Эти события есть в документации, но не реализованы
+public record UserCreatedEvent { ... }
+public record UserDeletedEvent { ... }
+```
+
+Чтобы добавить их, пришлось бы править `IEventPublisher` — это стоп-фактор.
+Разработчик думает: "Не хочу трогать интерфейс, который используют другие
+сервисы", — и событие остаётся нереализованным.
+
+### Дублирование логики
+
+Каждый метод в `KafkaEventPublisher` делает одно и то же:
+
+1. Сериализует событие в JSON.
+2. Создаёт сообщение с ключом.
+3. Публикует в топик.
+
+Разница только в типе события, названии топика и способе получения ключа.
+
+---
+
+## Как исправить?
+
+### Вариант 1: Обобщённый метод
+
+Самый простой способ — сделать обобщённый метод и маппинг события → топик через
+атрибуты или конфигурацию.
+
+```csharp
+// 1. Атрибут для топика
+[AttributeUsage(AttributeTargets.Class)]
+public class EventTopicAttribute : Attribute
+{
+  public string Topic { get; }
+  public EventTopicAttribute(string topic) => Topic = topic;
+}
+
+// 2. Новый интерфейс
+public interface IEventPublisher
+{
+  Task Publish<T>(T @event) where T : class;
+}
+
+// 3. Реализация
+public class KafkaEventPublisher : IEventPublisher
+{
+  private readonly IProducer<string, string> _producer;
+  private readonly Dictionary<Type, (string Topic, Func<object, string> KeyExtractor)> _topic_map;
+
+  public KafkaEventPublisher()
+  {
+    var config = new ProducerConfig
+    {
+      BootstrapServers = Fenvironment.KAFKA_BOOTSTRAP_SERVERS(),
+    };
+    _producer = new ProducerBuilder<string, string>(config).Build();
+
+    _topic_map = new Dictionary<Type, (string, Func<object, string>)>
+    {
+      [typeof(OrderCreatedEvent)] = (Fenvironment.ORDER_CREATED_TOPIC(), e => ((OrderCreatedEvent)e).OrderId.ToString()),
+      [typeof(ProductUpdatedEvent)] = (Fenvironment.PRODUCT_UPDATED_TOPIC(), e => ((ProductUpdatedEvent)e).ProductId.ToString()),
+    };
+  }
+
+  public async Task Publish<T>(T @event) where T : class
+  {
+    if (!_topic_map.TryGetValue(typeof(T), out var mapping))
+    {
+      throw new InvalidOperationException($"No topic configured for event {typeof(T).Name}");
+    }
+
+    var content = JsonSerializer.Serialize(@event);
+    var message = new Message<string, string>
+    {
+      Key = mapping.KeyExtractor(@event),
+      Value = content,
+    };
+    await _producer.ProduceAsync(mapping.Topic, message);
+  }
+}
+```
+
+**Плюсы:**
+
+- Интерфейс больше не меняется при добавлении новых событий.
+- Добавление нового события требует только добавить запись в `_topic_map`.
+- Нет дублирования кода.
+
+**Минусы:**
+
+- Всё ещё нужно менять `_topic_map` при добавлении события.
+
+### Вариант 2: Автоматическое обнаружение через атрибуты
+
+```csharp
+public interface IEventPublisher
+{
+  Task Publish<T>(T @event) where T : class;
+}
+
+public class KafkaEventPublisher : IEventPublisher
+{
+  private readonly IProducer<string, string> _producer;
+  private readonly Dictionary<Type, string> _topics;
+
+  public KafkaEventPublisher()
+  {
+    var config = new ProducerConfig
+    {
+      BootstrapServers = Fenvironment.KAFKA_BOOTSTRAP_SERVERS(),
+    };
+    _producer = new ProducerBuilder<string, string>(config).Build();
+
+    // Автоматически собираем все типы событий с атрибутом
+    _topics = Assembly.GetExecutingAssembly()
+      .GetTypes()
+      .Where(topic => topic.GetCustomAttribute<EventTopicAttribute>() != null)
+      .ToDictionary(
+        topic => topic,
+        topic => topic.GetCustomAttribute<EventTopicAttribute>()!.Topic
+      );
+  }
+
+  public async Task Publish<T>(T @event) where T : class
+  {
+    if (!_topics.TryGetValue(typeof(T), out var topic))
+    {
+      throw new InvalidOperationException($"No topic configured for event {typeof(T).Name}");
+    }
+
+    var content = JsonSerializer.Serialize(@event);
+    var message = new Message<string, string>
+    {
+      Key = GetKey(@event),
+      Value = content,
+    };
+    await _producer.ProduceAsync(topic, message);
+  }
+
+  private string GetKey<T>(T @event) where T : class
+  {
+    // Можно тоже вынести в атрибут или использовать reflection
+    return @event switch
+    {
+      OrderCreatedEvent e => e.OrderId.ToString(),
+      ProductUpdatedEvent e => e.ProductId.ToString(),
+      _ => Guid.NewGuid().ToString(),
+    };
+  }
+}
+```
+
+Теперь добавление нового события:
+
+```csharp
+[EventTopic("user-created")]
+public record UserCreatedEvent
+{
+  public int UserId { get; init; }
+  public required string Email { get; init; }
+}
+```
+
+**Никаких изменений в `IEventPublisher` или `KafkaEventPublisher`** — всё
+работает автоматически.
+
+### Вариант 3: Адаптация под существующую архитектуру
+
+Если хочется сохранить интерфейс для совместимости, можно добавить обобщённый
+метод, а старые методы оставить как обёртки:
+
+```csharp
+public interface IEventPublisher
+{
+  // Новый обобщённый метод
+  Task Publish<T>(T @event) where T : class;
+
+  // Старые методы — для обратной совместимости
+  Task PublishOrderCreated(OrderCreatedEvent @event);
+  Task PublishProductUpdated(ProductUpdatedEvent @event);
+}
+
+public class KafkaEventPublisher : IEventPublisher
+{
+  public async Task Publish<T>(T @event) where T : class
+  {
+    // ... общая логика
+  }
+
+  public async Task PublishOrderCreated(OrderCreatedEvent @event)
+    => await Publish(@event);
+
+  public async Task PublishProductUpdated(ProductUpdatedEvent @event)
+    => await Publish(@event);
+}
+```
+
+Это позволяет постепенно переходить на новый подход, не ломая существующий код.
+
+---
+
+## Что мы получили?
+
+Мы взяли интерфейс, который был **жёстко привязан к конкретным событиям**, и
+превратили его в **обобщённую абстракцию**:
+
+- Интерфейс теперь **закрыт для изменений** — он не меняется при добавлении
+  новых событий.
+- Система **открыта для расширения** — новое событие добавляется созданием
+  нового класса с атрибутом или записью в конфигурации.
+- Исчезло дублирование кода — вся логика публикации теперь в одном методе.
+- Легко добавлять новые события, не боясь сломать существующие.
+
+---
+
+## Итог
+
+`IEventPublisher` — это классический пример нарушения **OCP**:
+
+- Интерфейс расширяется с каждым новым событием.
+- Все реализации (даже потенциальные) вынуждены меняться.
+- Это создаёт барьер для добавления новых фич.
+
+Исправление через **обобщённый интерфейс** и **конфигурацию** делает систему
+гибкой, открытой для роста и простой в поддержке.
+
+> **Запомните:** Если вы видите интерфейс с методами, имена которых содержат
+> конкретные сущности (`PublishOrderCreated`, `PublishProductUpdated`) — это
+> красный флаг. Скорее всего, вы нарушаете OCP. Вместо этого используйте
+> обобщённый метод и маппинг типов на топики.
+
+---
+
+_Исходный код доступен в
+[репозитории CsTestShop](https://github.com/FOCKUSTY/CsTestShop/blob/cc42c6f594b410cb0f7d46b51f0dd7f04d2649df)._

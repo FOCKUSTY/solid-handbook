@@ -1,0 +1,389 @@
+# BitField и BitFieldView
+
+Возьмём пример из
+[bit-field](https://github.com/FOCKUSTY/bit-field/tree/953d4af0e7f312c12050202dd73b89e25d3d24eb).
+
+В библиотеке есть три ключевых компонента:
+
+- `BitFieldView` — отвечает за **представление** битового поля (чтение,
+  преобразование, итерация).
+- `BitField` — наследуется от `BitFieldView` и добавляет **операции изменения**.
+- `BitFieldOperations` — статические утилиты для работы с битами.
+
+Это пример **OCP через наследование и композицию**: базовый класс закрыт для
+изменений, а новые операции добавляются через наследование или статические
+утилиты.
+
+---
+
+## Код
+
+### BitFieldView — только чтение
+
+```typescript
+export abstract class BitFieldView {
+  protected _bit: bigint;
+
+  protected constructor(bit: BitFieldInput = ZERO_BIT) {
+    this._bit = BitFieldOperations.toBigInt(bit);
+  }
+
+  public toArray(): bigint[] {
+    return [...this];
+  }
+
+  public toHexString(): string {
+    return this._bit.toString(16);
+  }
+
+  public toBinaryString(): string {
+    return this._bit.toString(2);
+  }
+
+  public toNumber(): number {
+    return Number(this._bit);
+  }
+
+  public toString(): string {
+    return this._bit.toString();
+  }
+
+  public toJSON(): string {
+    return this.toString();
+  }
+
+  public *[Symbol.iterator](): Generator<bigint, void, unknown> {
+    let bits = this._bit;
+    while (BitFieldOperations.notEquals(bits, ZERO_BIT)) {
+      const lowest = bits & -bits;
+      yield lowest;
+      bits ^= lowest;
+    }
+  }
+
+  public forEach(callback: (bit: bigint) => void): void {
+    for (const bit of this) {
+      callback(bit);
+    }
+  }
+}
+```
+
+**Что здесь есть:**
+
+- Только методы **чтения** и **преобразования**.
+- Нет методов изменения (`add`, `remove`, `clear`).
+- Абстрактный класс — нельзя создать экземпляр напрямую.
+
+**Единственная ответственность:** представление битового поля.
+
+---
+
+### BitField — операции изменения
+
+```typescript
+export class BitField extends BitFieldView {
+  public static fromBinary(binaryString: string): BitField {
+    // создание из двоичной строки
+  }
+
+  public static fromHex(hexString: string): BitField {
+    // создание из шестнадцатеричной строки
+  }
+
+  public constructor(bit: BitFieldInput = ZERO_BIT) {
+    super(BitFieldOperations.toBigInt(bit));
+  }
+
+  public get bit(): bigint {
+    return this._bit;
+  }
+
+  public clone(): BitField {
+    return new BitField(this._bit);
+  }
+
+  public set(bit: BitFieldInput): BitField {
+    return new BitField(BitFieldOperations.toBigInt(bit));
+  }
+
+  public add(...bits: MustArray<BitFieldInput>): BitField {
+    const newBit = BitFieldOperations.summarize(this._bit, ...bits);
+    return new BitField(newBit);
+  }
+
+  public remove(...bits: MustArray<BitFieldInput>): BitField {
+    const newBit = BitFieldOperations.remove(this._bit, ...bits);
+    return new BitField(newBit);
+  }
+
+  public clear(): BitField {
+    return new BitField(ZERO_BIT);
+  }
+
+  public and(bit: BitFieldInput): BitField {
+    const mask = BitFieldOperations.toBigInt(bit);
+    return new BitField(this._bit & mask);
+  }
+
+  public or(bit: BitFieldInput): BitField {
+    const mask = BitFieldOperations.toBigInt(bit);
+    return new BitField(this._bit | mask);
+  }
+
+  public xor(bit: BitFieldInput): BitField {
+    const mask = BitFieldOperations.toBigInt(bit);
+    return new BitField(this._bit ^ mask);
+  }
+
+  public not(bitLength?: number): BitField {
+    const length = bitLength ?? this._bit.toString(2).length;
+    const mask = BitFieldOperations.maskOfLength(length);
+    return new BitField(~this._bit & mask);
+  }
+
+  public hasOne(bit: BitFieldInput): boolean {
+    const value = BitFieldOperations.toBigInt(bit);
+    const mask = this._bit & value;
+    return BitFieldOperations.equals(mask, value);
+  }
+
+  public hasSome(...bits: MustArray<BitFieldInput>): boolean {
+    return bits.some((bit) => this.hasOne(bit));
+  }
+
+  public has(...bits: MustArray<BitFieldInput>): boolean {
+    if (bits.length === 1) {
+      return this.hasOne(bits[0]);
+    }
+    const summary = BitFieldOperations.summarize(...bits);
+    const mask = this._bit & summary;
+    return BitFieldOperations.equals(mask, summary);
+  }
+
+  // ... другие методы (сдвиги, диапазоны и т.д.)
+}
+```
+
+**Что здесь есть:**
+
+- Наследуется от `BitFieldView`.
+- Добавляет методы **изменения** (`add`, `remove`, `clear`).
+- Добавляет **побитовые операции** (`and`, `or`, `xor`, `not`).
+- Добавляет **проверки** (`has`, `hasSome`, `hasOne`).
+- **Все методы возвращают новый экземпляр** — иммутабельность.
+
+**Единственная ответственность:** операции над битовым полем.
+
+---
+
+### BitFieldOperations — статические утилиты
+
+```typescript
+export class BitFieldOperations {
+  public static toBigInt(bit: BitFieldInput): bigint {
+    if (typeof bit === "object" && bit !== null && "bit" in bit) {
+      return bit.bit;
+    }
+    return BigInt(bit);
+  }
+
+  public static equals(first: BitFieldInput, second: BitFieldInput): boolean {
+    return this.toBigInt(first) === this.toBigInt(second);
+  }
+
+  public static summarize(...bits: BitFieldInput[]): bigint {
+    let summary: bigint = ZERO_BIT;
+    for (const bit of bits) {
+      summary |= this.toBigInt(bit);
+    }
+    return summary;
+  }
+
+  public static add(bit: BitFieldInput, ...add: BitFieldInput[]): bigint {
+    return this.toBigInt(bit) | this.summarize(...add);
+  }
+
+  public static remove(bit: BitFieldInput, ...remove: BitFieldInput[]): bigint {
+    return this.toBigInt(bit) & ~this.summarize(...remove);
+  }
+
+  public static logarithm2(bit: BitFieldInput): bigint {
+    const value = this.toBigInt(bit);
+    if (value === ZERO_BIT) {
+      throw new Error("logarithm2(0) is undefined");
+    }
+    const bitLength = value.toString(2).length;
+    return BigInt(bitLength - 1);
+  }
+
+  public static maskOfLength(bits: number): bigint {
+    if (bits <= 0) {
+      return ZERO_BIT;
+    }
+    return (ONE_BIT << BigInt(bits)) - ONE_BIT;
+  }
+
+  // ... другие утилиты
+}
+```
+
+**Что здесь есть:**
+
+- Только **статические методы**.
+- Нет состояния.
+- Все методы **чистые** (не меняют входные данные).
+
+**Единственная ответственность:** чистые функции для работы с битами.
+
+---
+
+## Что здесь хорошо с точки зрения OCP?
+
+### 1. Базовый класс закрыт для изменений
+
+`BitFieldView` **не меняется** при добавлении новых операций. Если нам
+понадобится новая операция (например, `toggle`), мы:
+
+1. Добавляем метод в `BitField`.
+2. **Не трогаем** `BitFieldView`.
+
+```typescript
+// Новый метод в BitField
+public toggle(bit: BitFieldInput): BitField {
+  const mask = BitFieldOperations.toBigInt(bit);
+  return new BitField(this._bit ^ mask);
+}
+```
+
+**Что не трогаем:**
+
+- `BitFieldView` — остаётся без изменений.
+- Существующие методы `BitField` — остаются без изменений.
+
+### 2. Наследование не нарушает LSP
+
+`BitField` — это расширение `BitFieldView`:
+
+- Он добавляет новые методы, но **не изменяет поведение** существующих.
+- Любую функцию, принимающую `BitFieldView`, можно безопасно передать
+  `BitField`.
+
+```typescript
+function printBits(view: BitFieldView) {
+  console.log(view.toBinaryString());
+}
+
+const bf = new BitField(0b1010);
+printBits(bf); // ✅ работает
+```
+
+### 3. Разделение на чтение и запись
+
+- Если вам нужно только читать битовое поле (например, в функции логирования),
+  вы можете работать с `BitFieldView`.
+- Если нужно изменять — используйте `BitField`.
+
+Это также соответствует **ISP** (Interface Segregation Principle) — клиент не
+зависит от методов, которые ему не нужны.
+
+### 4. Статические утилиты открыты для расширения
+
+`BitFieldOperations` — это коллекция чистых функций. Добавление новой утилиты:
+
+```typescript
+public static toggle(bit: BitFieldInput, toggle: BitFieldInput): bigint {
+  return this.toBigInt(bit) ^ this.toBigInt(toggle);
+}
+```
+
+**Что не трогаем:**
+
+- Существующие утилиты.
+- `BitField` и `BitFieldView`.
+- Клиентский код, использующий старые утилиты.
+
+### 5. Иммутабельность
+
+Все методы `BitField` возвращают **новый экземпляр**, а не изменяют текущий.
+Это:
+
+- Делает код предсказуемым.
+- Упрощает тестирование.
+- Позволяет безопасно использовать в многопоточном окружении.
+- Не требует изменений в `BitFieldView` при добавлении новых операций.
+
+---
+
+## Что можно было бы улучшить?
+
+### 1. `BitFieldOperations` — статический класс-утка
+
+`BitFieldOperations` — это статический класс-утка, который содержит много
+методов. Если бы мы захотели использовать другую реализацию (например,
+оптимизированную на WebAssembly), мы не могли бы её подменить.
+
+**Почему это проблема:**
+
+- Статические методы жёстко привязаны к реализации.
+- Нельзя подменить в тестах.
+- Нельзя расширить без изменения класса.
+
+**Как можно исправить (если бы понадобилось):**
+
+```typescript
+interface BitOperations {
+  toBigInt(bit: BitFieldInput): bigint;
+  summarize(...bits: BitFieldInput[]): bigint;
+  // ...
+}
+
+class DefaultBitOperations implements BitOperations {
+  // реализация
+}
+
+// В BitField
+public constructor(
+  bit: BitFieldInput = ZERO_BIT,
+  private ops: BitOperations = new DefaultBitOperations()
+) {
+  this._bit = ops.toBigInt(bit);
+}
+```
+
+Но для библиотеки такого размера это было бы **избыточным усложнением**. Текущее
+решение работает и не требует изменений.
+
+### 2. `BitFieldView` — абстрактный класс с публичным полем
+
+`_bit` защищён, но все методы работают с ним напрямую. Это не нарушает OCP, но
+если бы мы захотели изменить способ хранения (например, на `number[]`), пришлось
+бы менять `BitFieldView`.
+
+**Но** это **инкапсуляция**, а не нарушение OCP. Изменение способа хранения —
+это и есть изменение реализации, которое должно затрагивать только
+`BitFieldView`. Если бы мы хотели сделать систему более гибкой, можно было бы
+вынести хранение в отдельный класс.
+
+---
+
+## Итог
+
+`BitField` и `BitFieldView` — пример грамотного разделения ответственности, где:
+
+- `BitFieldView` **закрыт для изменений** — он отвечает только за представление.
+- `BitField` **открыт для расширения** — новые операции добавляются через
+  наследование.
+- `BitFieldOperations` **открыт для расширения** — новые утилиты добавляются как
+  статические методы.
+- **Наследование не нарушает LSP** — наследник полностью соответствует родителю.
+
+> **Запомните:** Разделяйте **чтение** и **запись**, **представление** и
+> **логику**. Это делает ваш код гибким, предсказуемым и открытым для
+> расширения. Иммутабельность — ваш друг, она упрощает тестирование и
+> предотвращает побочные эффекты.
+
+---
+
+_Исходный код доступен в
+[репозитории bit-field](https://github.com/FOCKUSTY/bit-field/tree/953d4af0e7f312c12050202dd73b89e25d3d24eb)._
