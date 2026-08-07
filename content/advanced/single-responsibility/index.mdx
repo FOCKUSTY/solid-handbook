@@ -17,6 +17,16 @@ _Каждая сущность в коде должна иметь только 
 - [BitBuilder в BitField](/advanced/single-responsibility/bit-builder.mdx)
 - [Заключение](/advanced/single-responsibility/conclusion.mdx)
 
+### Что за примеры?
+
+- **[AuthGuard в Feeldown](/advanced/single-responsibility/auth-guard.mdx)** – разбор двух Guard-ов, которые разделяют аутентификацию и авторизацию. Идеальный пример SRP в NestJS.
+- **[UsersController в Feeldown](/advanced/single-responsibility/users-controller.mdx)** – как сделать контроллер «тонким», вынеся трансформацию параметров в декоратор.
+- **[Fenvironment в CsTestShop](/advanced/single-responsibility/fenvironment.mdx)** – классический «швейцарский нож»: загрузка .env, валидация и доступ к переменным в одном классе. Показываем, как разбить на три независимые сущности.
+- **[BitField](/advanced/single-responsibility/bit-field.mdx)** – разделение представления и операций над битовым полем. Отличный пример композиции и наследования без нарушения LSP.
+- **[BitBuilder в BitField](/advanced/single-responsibility/bit-builder.mdx)** – генератор битовых конфигураций, который делал слишком много. Учимся выделять утилиты и строить модульную архитектуру.
+
+Каждый пример сопровождается кодом «до» и «после», а также пояснениями, почему исходный вариант нарушал SRP и как исправление повлияло на тестируемость и гибкость.
+
 ## Чек-лист: не нарушаете ли вы SRP?
 
 Доступно по [ссылке](/advanced/single-responsibility/check-list.mdx)
