@@ -1,0 +1,279 @@
+# `IUserRepository` в `CsTestShop`
+
+_правильная подстановка через DI_
+
+Возьмём пример из
+[CsTestShop](https://github.com/FOCKUSTY/CsTestShop/blob/cc42c6f594b410cb0f7d46b51f0dd7f04d2649df).
+
+В проекте есть интерфейс `IUserRepository`, который описывает работу с
+пользователями в базе данных, и его единственная реализация — `UserRepository`.
+В `Program.cs` они связываются через DI-контейнер:
+
+```csharp
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+```
+
+На первый взгляд — обычная строка регистрации. На самом деле это **живая
+демонстрация принципа подстановки Лисков**: контейнер гарантирует, что везде,
+где запрошен `IUserRepository`, будет подставлен `UserRepository`, и код будет
+работать так, как ожидает клиент. Разберём, почему это работает.
+
+---
+
+## Код
+
+### Интерфейс IUserRepository
+
+```csharp
+public interface IUserRepository
+{
+  Task<User> GetUser(int id);
+  Task<User> GetUserByEmail(string email);
+  Task<User> CreateUser(
+    string email,
+    string name,
+    string passwordHash,
+    string accessToken,
+    string refreshToken
+  );
+  Task<User> UpdateUser(int id, string? email, string? name, string? role);
+  Task<bool> DeleteUser(int id);
+}
+```
+
+### Реализация UserRepository
+
+```csharp
+public class UserRepository : IUserRepository
+{
+  private readonly string _connection_string =
+    DatabaseService.CONNECTION_STRING();
+
+  public async Task<User> GetUser(int id)
+  {
+    // ... SELECT по id
+  }
+
+  public async Task<User> GetUserByEmail(string email)
+  {
+    // ... SELECT по email
+  }
+
+  public async Task<User> CreateUser(
+    string email,
+    string name,
+    string passwordHash,
+    string accessToken,
+    string refreshToken
+  )
+  {
+    // ... INSERT
+  }
+
+  public Task<User> UpdateUser(
+    int id,
+    string? email,
+    string? name,
+    string? role
+  )
+  {
+    throw new NotImplementedException(); // 🚧 WIP
+  }
+
+  public Task<bool> DeleteUser(int id)
+  {
+    throw new NotImplementedException(); // 🚧 WIP
+  }
+}
+```
+
+### Регистрация в DI
+
+```csharp
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+```
+
+### Клиент — `AuthenticationRouter`
+
+```csharp
+internal class AuthenticationRouter(
+  IUserRepository userRepository,
+  IUserService userService
+) : Authenticator.AuthenticatorBase
+{
+  public override async Task<UserReply> Register(
+    UserInit request,
+    ServerCallContext context
+  )
+  {
+    UserCredentials credentials = userService.CreateUserCredentials(
+      new BaseUser { Email = request.Email },
+      request.Password
+    );
+
+    User user = await userRepository.CreateUser(
+      request.Email,
+      request.Name,
+      credentials.Password,
+      credentials.AccessToken,
+      credentials.RefreshToken
+    );
+
+    return userService.CreateReply(user);
+  }
+
+  public override async Task<UserReply> Login(
+    UserLogin request,
+    ServerCallContext context
+  )
+  {
+    User user = await userRepository.GetUserByEmail(request.Email);
+    if (!userService.ComparePassword(user, request.Password))
+    {
+      throw new HttpRequestException();
+    }
+
+    return userService.CreateReply(user);
+  }
+}
+```
+
+Обрати внимание: `AuthenticationRouter` **никогда не знает** о `UserRepository`.
+Он принимает `IUserRepository` в конструкторе и работает только с методами,
+объявленными в интерфейсе.
+
+---
+
+## Что здесь хорошо
+
+### 1. Подстановка работает без сюрпризов
+
+`AuthenticationRouter` объявляет зависимость от `IUserRepository`. DI-контейнер
+подставляет `UserRepository`. Клиент вызывает `CreateUser` и `GetUserByEmail` —
+и получает ровно то, что обещает сигнатура:
+
+- `CreateUser` возвращает `Task<User>` — и действительно возвращает созданного
+  пользователя с заполненными полями.
+- `GetUserByEmail` возвращает `Task<User>` — и действительно возвращает
+  пользователя, если он есть.
+
+Никаких «вернётся, но не всегда», никаких «может упасть, если что-то не так».
+**Контракт соблюдён** — значит, подстановка безопасна. Это и есть LSP в
+действии.
+
+### 2. `AddScoped<IUserRepository, UserRepository>()` — это и есть обещание
+
+В C# регистрация в DI — это **декларация подстановки**. Строка
+`AddScoped<IUserRepository, UserRepository>()` говорит контейнеру:
+
+> «Везде, где кто-то запросит `IUserRepository`, подставь ему `UserRepository`.
+> И будь уверен, что клиент не заметит разницы».
+
+Это **ровно** та самая формулировка LSP: «Объекты в программе должны быть
+заменяемы экземплярами их подтипов без изменения правильности выполнения
+программы». Регистрация в DI — это техническая реализация этой идеи. Если бы
+`UserRepository` нарушал контракт, DI бы этого не заметил (C# не проверяет LSP
+на этапе компиляции), но клиент — заметил бы. В нашем случае этого не
+происходит.
+
+### 3. Клиент не знает о реализации
+
+`AuthenticationRouter` использует только методы интерфейса. Он не знает:
+
+- Что под капотом PostgreSQL.
+- Что используется `NpgsqlConnection`.
+- Как формируются SQL-запросы.
+
+Он знает только контракт. Это **и есть** преимущество LSP: клиент может не
+думать о деталях реализации, потому что уверен — любая корректная реализация
+ведёт себя одинаково.
+
+### 4. Легко мокать в тестах
+
+Благодаря тому, что `UserRepository` полностью соответствует контракту, в тестах
+можно подставить мок:
+
+```csharp
+var mockRepository = new Mock<IUserRepository>();
+mockRepository
+  .Setup(r => r.GetUserByEmail("test@example.com"))
+  .ReturnsAsync(new User { /* ... */ });
+
+var router = new AuthenticationRouter(mockRepository.Object, userService);
+```
+
+Тест работает, потому что мок **ведёт себя как `UserRepository`** с точки зрения
+клиента: возвращает `Task<User>` для корректного email. Если бы `UserRepository`
+где-то бросал неожиданное исключение или возвращал `null` вместо `User`, мок бы
+этого не воспроизвёл — и тест бы прошёл, а прод упал. Но контракт соблюдён,
+поэтому мок и реальная реализация **взаимозаменяемы**.
+
+### 5. `ProductRepository`, `OrderRepository` — та же история
+
+В `Program.cs` зарегистрированы ещё два репозитория:
+
+```csharp
+builder.Services.AddScoped<IProductRepository, ProductRepository>();
+builder.Services.AddScoped<IOrderRepository, OrderRepository>();
+```
+
+Обе реализации — завершены и полностью соответствуют своим интерфейсам.
+`ProductRepository.UpdateProduct` возвращает `Product` или бросает
+`KeyNotFoundException`, если запись не найдена — ровно как ожидает
+`IProductRepository`. `OrderRepository.CancelOrder` возвращает `bool` —
+«отменилось или нет», и это часть контракта, а не сюрприз. Клиенты
+(`ProductRouter`, `OrderRouter`) не знают, что под капотом SQL, и **не должны**.
+
+---
+
+## 🚧 Про WIP-методы
+
+`UpdateUser` и `DeleteUser` в `UserRepository` бросают
+`NotImplementedException`. Это **не нарушение LSP**, а **незавершённая работа**:
+методы ещё не написаны. В `DOCUMENTATION.md` проекта прямо указано:
+
+> **Обновление пользователя и удаление** — методы `UpdateUser` и `DeleteUser` не
+> реализованы.
+
+Такие методы не учитываются при анализе LSP. Принцип подстановки применяется к
+**готовому коду**, который считается корректным. Если бы мы учитывали WIP, то
+любая незаконченная фича автоматически «нарушала» бы LSP — что бессмысленно.
+
+Когда методы будут дописаны, они должны соответствовать контракту интерфейса:
+`UpdateUser` вернёт `Task<User>`, `DeleteUser` — `Task<bool>`. Тогда подстановка
+останется безопасной. Если же в процессе реализации разработчик решит, например,
+что `UpdateUser` при ненайденном пользователе возвращает `null` (а `GetUser` при
+этом бросает `KeyNotFoundException`), — вот **тогда** появится LSP-нарушение, и
+его нужно будет чинить.
+
+> **Важно для читателя:** `NotImplementedException` в проекте — это маркер
+> «здесь ещё не готово», а не «здесь нарушен LSP». Не путайте эти два состояния.
+> Когда код завершён, он либо соответствует контракту (тогда LSP соблюдён), либо
+> нет (тогда LSP нарушен). WIP — вне этой дихотомии.
+
+---
+
+## Итог
+
+`IUserRepository` и `UserRepository` — пример **правильной подстановки**:
+
+- Реализация полностью соответствует контракту интерфейса — по завершённым
+  методам.
+- DI-контейнер подставляет `UserRepository` везде, где ожидается
+  `IUserRepository`, и клиенты этого не замечают.
+- Клиенты (`AuthenticationRouter`) работают только с абстракцией и не знают о
+  деталях реализации.
+- Тесты легко подставляют моки, потому что мок и реальная реализация ведут себя
+  одинаково.
+
+> **Запомните:** LSP — это не только про иерархии классов. Это про **любую
+> подстановку**: интерфейс + реализация, базовый класс + наследник, абстракция +
+> конкретика. DI-контейнер — это техническая точка, где подстановка происходит.
+> Если она безопасна (клиент не замечает разницы) — LSP соблюдён. Если нет —
+> нарушен. И самое главное: `NotImplementedException` — это WIP, а не нарушение.
+> Анализируйте только завершённый код.
+
+---
+
+_Исходный код доступен в
+[репозитории CsTestShop](https://github.com/FOCKUSTY/CsTestShop/blob/cc42c6f594b410cb0f7d46b51f0dd7f04d2649df)._

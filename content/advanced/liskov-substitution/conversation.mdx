@@ -1,0 +1,518 @@
+# Conversation в `uust-schedule-bot`
+
+_правильное наследование против нарушения подстановки_
+
+Возьмём пример из
+[uust-schedule-bot](https://github.com/FOCKUSTY/uust-schedule-bot).
+
+В проекте есть тип `Conversation`, который описывает диалог с пользователем в
+Telegram. Три класса — `RegistrationConversation`, `ScheduleConversation` и
+`GroupsScheduleConversation` — реализуют этот тип. Все три обещают выполнить
+сценарий диалога. Но при ближайшем рассмотрении оказывается, что реализуют они
+это **по-разному**.
+
+---
+
+## Код
+
+### Тип Conversation
+
+```typescript
+// src/interfaces/conversation.interface.ts
+export type Conversation = {
+  execute(conversation: MyConversation, context: Context): Promise<void>;
+};
+```
+
+**Что здесь обещано:** `execute()` выполняет диалог и завершается. Точка.
+Никаких условий, никаких исключений, никаких «может не сработать».
+
+### RegistrationConversation
+
+```typescript
+export class RegistrationConversation implements Conversation {
+  private readonly _api = new AparkitApi();
+  private readonly _user_service = new UserService();
+
+  public async execute(
+    conversation: MyConversation,
+    context: Context,
+  ): Promise<void> {
+    const telegramId = context.from?.id;
+    if (!telegramId) return; // ⚠️ тихий выход
+
+    const faculty = await this.promptFaculty(conversation, context);
+    if (!faculty) return this.cancel(context, conversation);
+
+    const course = await this.promptCourse(conversation, context, faculty);
+    if (!course) return this.cancel(context, conversation);
+
+    const specialization = await this.promptSpecialization(
+      conversation,
+      context,
+      faculty,
+      course,
+    );
+    if (!specialization) return this.cancel(context, conversation);
+
+    const group = await this.promptGroup(
+      conversation,
+      context,
+      faculty,
+      course,
+      specialization,
+    );
+    if (!group) return this.cancel(context, conversation);
+
+    const info: GroupInformation = {
+      faculty,
+      course,
+      specialization,
+      group: group.title,
+      groupId: group.id,
+    };
+
+    await conversation.external(() =>
+      this._user_service.addConfig(telegramId, info, true),
+    );
+
+    await sendOrEditMessage(
+      context,
+      `✅ Группа сохранена\n\n` +
+        `🎓 Факультет: ${faculty}\n` +
+        `📚 Курс: ${course}\n` +
+        `🏷 Специализация: ${specialization}\n` +
+        `👥 Группа: ${group.title}`,
+      {
+        conversation,
+        keyboard: mainMenuKeyboard(),
+      },
+    );
+  }
+}
+```
+
+### ScheduleConversation
+
+```typescript
+export class ScheduleConversation implements Conversation {
+  private readonly _schedule: AparkitSchedule = new AparkitSchedule();
+  private readonly _user_service: UserService = new UserService();
+
+  public async execute(
+    conversation: MyConversation,
+    context: Context,
+  ): Promise<void> {
+    const session = await conversation.external(({ session }) => session);
+    const telegramId = context.from?.id;
+    if (!telegramId) {
+      throw new Error("id is not defined."); // ⚠️ исключение
+    }
+
+    const configs = await this._user_service.getActiveConfigs(telegramId);
+    const defaultConfig = configs.find((config) => config.defaulted);
+
+    if (configs.length === 0 || !defaultConfig) {
+      return sendOrEditMessage(context, "Выберите группу", {
+        keyboard: configSelectionKeyboard(configs),
+        conversation,
+      });
+    }
+
+    // ... основная логика отображения расписания
+  }
+}
+```
+
+### GroupsScheduleConversation
+
+```typescript
+export class GroupsScheduleConversation implements Conversation {
+  private readonly _schedule: AparkitSchedule = new AparkitSchedule();
+  private readonly _user_service: UserService = new UserService();
+
+  public async execute(
+    conversation: MyConversation,
+    context: Context,
+  ): Promise<void> {
+    const session = await conversation.external(({ session }) => session);
+    const telegramId = context.from?.id;
+    if (!telegramId) {
+      throw new Error("id is not defined."); // ⚠️ исключение
+    }
+
+    // ... основная логика
+  }
+}
+```
+
+---
+
+## Что плохо
+
+### 1. Разное поведение при отсутствии `telegramId`
+
+Все три реализации при одном и том же входном состоянии
+(`context.from === undefined`) ведут себя по-разному:
+
+| Реализация                   | Поведение при `context.from === undefined` |
+| ---------------------------- | ------------------------------------------ |
+| `RegistrationConversation`   | молча завершается                          |
+| `ScheduleConversation`       | бросает `Error`                            |
+| `GroupsScheduleConversation` | бросает `Error`                            |
+
+Формально все три удовлетворяют типу `Conversation`. Фактически — нет, потому
+что клиент не может рассчитывать на одинаковое поведение при подстановке любой
+реализации.
+
+**Почему это нарушение LSP.** Тип `Conversation` обещает: «выполнить диалог и
+завершиться». Он **не говорит**, что делать, если `telegramId` не определён. В
+`RegistrationConversation` решили «ничего не делать и молча выйти». В
+`ScheduleConversation` — «упасть с понятной ошибкой». Оба варианта допустимы с
+точки зрения сигнатуры, но **не взаимозаменяемы**: клиент, ожидающий исключение,
+получит его от одного класса, но не получит от другого. Это ровно то, чего LSP
+не допускает.
+
+### 2. Разные точки проверки
+
+Обрати внимание на **порядок операций**:
+
+- `RegistrationConversation` проверяет `telegramId` **до** любого обращения к
+  сессии.
+- `ScheduleConversation` и `GroupsScheduleConversation` — **после** вызова
+  `conversation.external()`.
+
+```typescript
+// ScheduleConversation — сначала external, потом проверка
+const session = await conversation.external(({ session }) => session);
+const telegramId = context.from?.id;
+if (!telegramId) {
+  throw new Error("id is not defined.");
+}
+```
+
+```typescript
+// RegistrationConversation — сначала проверка, external вообще нет
+const telegramId = context.from?.id;
+if (!telegramId) return;
+```
+
+На практике это значит, что если `conversation.external()` имеет побочные
+эффекты (например, читает сессию из базы или лочит ресурсы), то в
+`RegistrationConversation` этого не произойдёт, а в `ScheduleConversation` —
+произойдёт. Клиент не может предсказать поведение, не заглянув в реализацию.
+
+**Почему это нарушение LSP.** Инвариант «проверка `telegramId` — это **первое**,
+что делает `execute()`» не зафиксирован в контракте. Каждая реализация
+устанавливает его сама — и устанавливает по-разному.
+
+### 3. Неявные предусловия
+
+Все три реализации молчаливо полагаются на то, что `context.from` — это объект с
+полем `id`. В Telegram это так в 99,99% случаев, но **тип `Context` этого не
+гарантирует**:
+
+```typescript
+export type Context = SessionFlavor<SessionData> &
+  ConversationFlavor<GrammyContext>;
+```
+
+`GrammyContext` — это тип из grammy, у которого `from?: User` (опциональное
+поле). Значит, с точки зрения типов, `context.from` **может быть `undefined`**.
+И код это честно обрабатывает — но **по-разному**.
+
+**Почему это нарушение LSP.** Контракт `execute()` не описывает предусловие
+«`context.from` определён». Каждая реализация **сама** решает, что делать, если
+оно не выполнено. И решает по-разному. Клиент, вызывающий `execute()` через
+`CONVERSATIONS`, не знает заранее, что произойдёт, если `from` отсутствует —
+потому что это зависит от конкретного класса.
+
+### 4. Никто не проверяет контракт
+
+В `conversations.ts` все диалоги регистрируются одинаково:
+
+```typescript
+export const CONVERSATIONS: [string, Conversation][] = [
+  [RegistrationConversation.name, new RegistrationConversation()],
+  [ScheduleConversation.name, new ScheduleConversation()],
+  [GroupsScheduleConversation.name, new GroupsScheduleConversation()],
+];
+```
+
+А в `bot.ts` они все подключаются через один и тот же механизм:
+
+```typescript
+CONVERSATIONS.forEach(([name, conversation]) => {
+  bot.use(
+    createConversation(
+      (myConversation: MyConversation, context: Context) =>
+        conversation.execute.call(conversation, myConversation, context),
+      name,
+    ),
+  );
+});
+```
+
+Тип `Conversation` здесь — это **структурный тип**. TypeScript проверит, что у
+объекта есть метод `execute(...)`. Всё. Никаких гарантий, что три класса ведут
+себя одинаково, тип не даёт. Это тоже нарушение LSP: подстановка не обеспечена
+на уровне типа.
+
+---
+
+## Улучшенный код
+
+Есть два подхода. Можно применить их вместе, а можно выбрать один — в
+зависимости от того, насколько жёстко хочется зафиксировать контракт.
+
+### Шаг 1 — вынести проверку в базовый класс (шаблонный метод)
+
+Самый надёжный способ — не давать наследникам самим решать, что делать при
+отсутствии `telegramId`. Пусть это делает базовый класс.
+
+Заменим тип `Conversation` на абстрактный класс:
+
+```typescript
+export abstract class BaseConversation {
+  public async execute(
+    conversation: MyConversation,
+    context: Context,
+  ): Promise<void> {
+    const telegramId = context.from?.id;
+    if (!telegramId) {
+      throw new Error(
+        `[${this.constructor.name}] User ID is not defined in context`,
+      );
+    }
+
+    await this.run(conversation, context, telegramId);
+  }
+
+  protected abstract run(
+    conversation: MyConversation,
+    context: Context,
+    telegramId: number,
+  ): Promise<void>;
+}
+```
+
+**Что изменилось:**
+
+- Проверка `telegramId` живёт в одном месте — и она гарантированно выполняется
+  **до** любого взаимодействия с сессией.
+- Наследник больше не может выбрать «молча выйти» или «бросить исключение».
+  Контракт один: нет `telegramId` — исключение.
+- Наследник получает `telegramId` уже **гарантированно определённым** — и не
+  должен сам делать проверки.
+- Порядок операций одинаков: сначала проверка, потом любая работа с сессией,
+  потом логика.
+
+### Шаг 2 — переписать наследников
+
+Теперь каждый диалог реализует только `run()` — и получает `telegramId` уже
+готовым.
+
+```typescript
+export class RegistrationConversation extends BaseConversation {
+  private readonly _api = new AparkitApi();
+  private readonly _user_service = new UserService();
+
+  protected override async run(
+    conversation: MyConversation,
+    context: Context,
+    telegramId: number,
+  ): Promise<void> {
+    const faculty = await this.promptFaculty(conversation, context);
+    if (!faculty) return this.cancel(context, conversation);
+
+    const course = await this.promptCourse(conversation, context, faculty);
+    if (!course) return this.cancel(context, conversation);
+
+    const specialization = await this.promptSpecialization(
+      conversation,
+      context,
+      faculty,
+      course,
+    );
+    if (!specialization) return this.cancel(context, conversation);
+
+    const group = await this.promptGroup(
+      conversation,
+      context,
+      faculty,
+      course,
+      specialization,
+    );
+    if (!group) return this.cancel(context, conversation);
+
+    const info: GroupInformation = {
+      faculty,
+      course,
+      specialization,
+      group: group.title,
+      groupId: group.id,
+    };
+
+    await conversation.external(() =>
+      this._user_service.addConfig(telegramId, info, true),
+    );
+
+    await sendOrEditMessage(
+      context,
+      `✅ Группа сохранена\n\n` +
+        `🎓 Факультет: ${faculty}\n` +
+        `📚 Курс: ${course}\n` +
+        `🏷 Специализация: ${specialization}\n` +
+        `👥 Группа: ${group.title}`,
+      {
+        conversation,
+        keyboard: mainMenuKeyboard(),
+      },
+    );
+  }
+
+  // ... приватные методы promptFaculty, promptCourse и т.д.
+}
+```
+
+```typescript
+export class ScheduleConversation extends BaseConversation {
+  private readonly _schedule: AparkitSchedule = new AparkitSchedule();
+  private readonly _user_service: UserService = new UserService();
+
+  protected override async run(
+    conversation: MyConversation,
+    context: Context,
+    telegramId: number,
+  ): Promise<void> {
+    const session = await conversation.external(({ session }) => session);
+    const configs = await this._user_service.getActiveConfigs(telegramId);
+    const defaultConfig = configs.find((config) => config.defaulted);
+
+    if (configs.length === 0 || !defaultConfig) {
+      return sendOrEditMessage(context, "Выберите группу", {
+        keyboard: configSelectionKeyboard(configs),
+        conversation,
+      });
+    }
+
+    // ... основная логика отображения расписания
+  }
+}
+```
+
+```typescript
+export class GroupsScheduleConversation extends BaseConversation {
+  private readonly _schedule: AparkitSchedule = new AparkitSchedule();
+  private readonly _user_service: UserService = new UserService();
+
+  protected override async run(
+    conversation: MyConversation,
+    context: Context,
+    telegramId: number,
+  ): Promise<void> {
+    const session = await conversation.external(({ session }) => session);
+    // ... основная логика
+  }
+}
+```
+
+**Что изменилось:**
+
+- Ни один наследник больше не проверяет `telegramId` сам.
+- Ни один наследник не может «молча выйти» вместо ошибки.
+- Все три ведут себя одинаково при отсутствии `telegramId` — бросают исключение.
+- Все три получают `telegramId` уже определённым и используют его без `!` и
+  `?.`.
+
+### Шаг 3 — обновить регистрацию
+
+`CONVERSATIONS` теперь хранит `BaseConversation` вместо `Conversation`:
+
+```typescript
+export const CONVERSATIONS: [string, BaseConversation][] = [
+  [RegistrationConversation.name, new RegistrationConversation()],
+  [ScheduleConversation.name, new ScheduleConversation()],
+  [GroupsScheduleConversation.name, new GroupsScheduleConversation()],
+];
+```
+
+Остальной код (`bot.use(createConversation(...))`) не трогается. А вот сам тип
+`Conversation` из `conversation.interface.ts` можно **удалить** — его заменяет
+`BaseConversation`.
+
+**Почему это важно.** `BaseConversation` — это **номинальный тип** (в том
+смысле, что объект должен быть экземпляром класса или его наследника).
+TypeScript **не даст** подставить в `CONVERSATIONS` объект, который структурно
+похож на `Conversation`, но не является `BaseConversation`. Это защищает от
+случайного появления «самозванцев», которые не соблюдают контракт.
+
+#### Примечание
+
+Пытаясь решить проблему LSP, предлагают заменить `Promise<void>` на
+`Promise<ConversationResult>`, где Result — это `{ success: true }` |
+`{ success: false; reason }`. Это соблазнительно: кажется, что так мы «заставим»
+клиента обработать все случаи.
+
+Но в TypeScript, где исключения — идиоматичный механизм, гибридный Result даёт
+худшее из двух миров: код начинает проверять и success, и ловить исключения
+одновременно. Ошибки делятся на два класса — «ожидаемые» (через Result) и
+«неожиданные» (через throw) — и читатель каждый раз должен угадывать, к какому
+классу относится конкретная ситуация.
+
+Кроме того, cancelled — это вообще не ошибка. Пользователь нажал «Отмена» —
+диалог нормально завершился. Для этого достаточно return. Result нужен только
+там, где неудача — часть нормального потока (парсер, валидация, HTTP-клиент), и
+только если вы полностью отказываетесь от throw для этих случаев.
+
+Для Conversation правильное решение — шаблонный метод: предусловие фиксируется в
+базовом классе, нормальное завершение — просто return, а исключения остаются
+исключениями.
+
+## Что мы сделали и зачем
+
+Мы взяли тип `Conversation`, который обещал «выполнить диалог», и три
+реализации, каждая из которых **по-своему** ломала это обещание. Одна тихо
+завершалась, две бросали исключение. Одна проверяла `telegramId` до обращения к
+сессии, две — после.
+
+1. **Вынесли проверку `telegramId` в базовый класс.** Теперь все наследники
+   получают `telegramId` уже гарантированно определённым и **не могут**
+   обработать его отсутствие по-своему.
+
+2. **Заменили тип на абстрактный класс.** Тип не может заставить наследника
+   вести себя одинаково — а абстрактный класс с шаблонным методом может.
+   `execute()` теперь один, и он управляет потоком.
+
+3. **Убрали скрытые предусловия.** Раньше каждый наследник сам решал, что делать
+   с `telegramId`. Теперь это знает базовый класс — и только он.
+
+4. **Наследники стали взаимозаменяемыми.** Любой код, принимающий
+   `BaseConversation`, может вызвать `execute()` и рассчитывать на одинаковое
+   поведение — независимо от того, что это за диалог.
+
+---
+
+## Что в итоге
+
+`Conversation` — пример того, как один и тот же тип может быть реализован
+**тремя разными способами**. Формально все три класса удовлетворяют сигнатуре
+`execute()`, но **подставить один вместо другого без изменения поведения
+невозможно**: один молчит, другие падают; один проверяет `telegramId` раньше,
+другие — позже.
+
+> **Запомните:** LSP — это не только про сигнатуру. Это про **поведение**. Если
+> тип обещает «выполнить действие», он должен описать, **при каких условиях** и
+> **с какими последствиями**. И лучше всего — не описывать это словами в
+> комментариях, а **зафиксировать в базовом классе**. Абстрактный класс с
+> шаблонным методом сильнее, чем тип-интерфейс: он не даёт наследнику нарушить
+> контракт даже при желании. Если вы видите, что три реализации одного типа
+> делают проверку по-разному — это сигнал, что проверка должна жить в базовом
+> классе, а не в наследниках. И самое коварное здесь то, что ошибка не
+> проявляется, пока ты не подставишь одну реализацию вместо другой в реальном
+> сценарии.
+
+---
+
+_Исходный код доступен в
+[репозитории uust-schedule-bot](https://github.com/FOCKUSTY/uust-schedule-bot)._

@@ -1,0 +1,553 @@
+# `BasePlayer` в `buckshot-bot`
+
+_правильное наследование против нарушения подстановки_
+
+Возьмём пример из [buckshot-bot](https://github.com/FOCKUSTY/buckshot-bot).
+
+В проекте есть базовый класс `BasePlayer`, от которого наследуются три
+реализации: `RandomBot`, `ProbabilityBot` и `Player` (человек). Все три обещают
+выполнить ход и вернуть результат выстрела. На первый взгляд — классическая
+иерархия. Но стоит копнуть глубже, и становится видно, что наследники нарушают
+контракт базового класса.
+
+---
+
+## Код
+
+### Базовый класс BasePlayer
+
+```typescript
+export abstract class BasePlayer {
+  public static readonly MAX_ITEMS = 8 as const;
+  public static readonly MAX_HEALTH = 6 as const;
+
+  private _health: number;
+  private _alive: boolean;
+
+  protected readonly _items: Collection<BaseItem> = new Collection();
+  protected readonly _players: Collection<BasePlayer>;
+  protected readonly _shotgun: BaseShotgun;
+
+  public readonly events?: BasePlayerEvents;
+  public readonly position: Position;
+  public readonly name: string;
+
+  public constructor(data: BasePlayerConstructor, events?: BasePlayerEvents) {
+    this._players = data.players;
+    this._shotgun = data.shotgun;
+
+    this.events = events;
+    this._health = data.initialHealth;
+    this.position = data.position;
+    this.name = data.name;
+
+    this._alive = true;
+  }
+
+  public get health() {
+    return this._health;
+  }
+
+  public get alive() {
+    return this._alive;
+  }
+
+  public abstract execute(): Promise<BaseShotgunResult>;
+
+  public getItems(items: BaseItem[]) {
+    // ...
+  }
+
+  public async getDamage(count: number) {
+    // ...
+  }
+}
+```
+
+**Что здесь обещано:** `execute()` возвращает `Promise<BaseShotgunResult>`.
+Точка. Никаких условий, никаких исключений, никаких «может не сработать».
+
+По контракту — обычный игрок делает ход и возвращает результат выстрела. Всегда.
+
+### RandomBot
+
+```typescript
+export class RandomBot extends BasePlayer {
+  public override async execute(): Promise<BaseShotgunResult> {
+    const target = this.chooseRandomTarget()!; // ⚠️ неявное предусловие
+    const result = await this._shotgun.execute({
+      target: target.position,
+      initial: this.position,
+    });
+
+    this.events?.onShoot?.({
+      initial: this,
+      target: target,
+      items: this._items,
+      shell: result.shell,
+    });
+
+    return result;
+  }
+
+  private chooseRandomTarget(): BasePlayer | undefined {
+    const alivePlayers: BasePlayer[] = [];
+    for (const player of this._players.items) {
+      if (player.alive) {
+        alivePlayers.push(player);
+      }
+    }
+
+    if (alivePlayers.length === 0) return undefined;
+    const randomIndex = random.integer(0, alivePlayers.length - 1);
+    return alivePlayers[randomIndex];
+  }
+}
+```
+
+### ProbabilityBot
+
+```typescript
+export class ProbabilityBot extends BasePlayer {
+  public static readonly AGGRESSIVENESS = 0.1;
+
+  public override async execute(): Promise<BaseShotgunResult> {
+    const remaining = this._shotgun.remainingShells;
+    const total = remaining.length;
+
+    const liveCount = remaining.filter(
+      (shell) => shell === SHELLS.liveRound,
+    ).length;
+    const blankCount = total - liveCount;
+    const liveRoundProbability = liveCount / total; // ⚠️ предполагает total > 0
+    const blankProbability = blankCount / total;
+
+    console.log(
+      `[${this.name}] (ProBot) Вероятность боевого: ${liveRoundProbability}`,
+    );
+    console.log(
+      `[${this.name}] (ProBot) Вероятность холостого: ${blankProbability}`,
+    );
+    console.log(
+      `[${this.name}] (ProBot) Влияние агрессивности: ${ProbabilityBot.AGGRESSIVENESS}`,
+    );
+
+    if (
+      blankProbability - ProbabilityBot.AGGRESSIVENESS >
+      liveRoundProbability + ProbabilityBot.AGGRESSIVENESS
+    ) {
+      console.log(`[${this.name}] (ProBot) Стреляю в себя`);
+
+      const result = await this._shotgun.execute({
+        initial: this.position,
+        target: this.position,
+      });
+
+      this.events?.onShoot?.({
+        initial: result.initial,
+        target: result.target,
+        shell: result.shell,
+        items: this._items,
+      });
+
+      return result;
+    }
+
+    const alive = this._players.items.filter((player) => player.alive);
+    const enemies = alive.filter((player) => player.position !== this.position);
+    const sorted = enemies.sort((a, b) => a.health - b.health);
+    const target = sorted[0]!; // ⚠️ предполагает enemies.length > 0
+
+    const result = await this._shotgun.execute({
+      initial: this.position,
+      target: target.position,
+    });
+
+    this.events?.onShoot?.({
+      initial: result.initial,
+      target: result.target,
+      shell: result.shell,
+      items: this._items,
+    });
+
+    return result;
+  }
+}
+```
+
+### Player (человек)
+
+```typescript
+export class Player extends BasePlayer {
+  public override async execute(): Promise<BaseShotgunResult> {
+    return this.chooseAction();
+  }
+
+  private async chooseAction(): Promise<BaseShotgunResult> {
+    console.log("1 — Выбрать цель");
+
+    const action = await readline.question("Выберите действие: ");
+    if (!["1"].includes(action)) {
+      return this.chooseAction();
+    }
+
+    if (action === "1") {
+      return this.chooseTarget();
+    }
+
+    throw new Error();
+  }
+
+  private async chooseTarget(): Promise<BaseShotgunResult> {
+    console.log(`Цели:`);
+    this._players.forEach(({ item, position }) => {
+      if (item.name === this.name) {
+        return console.log(`${position} — в себя (${item.health} ОЗ)`);
+      }
+
+      console.log(`${position} — ${item.name} (${item.health} ОЗ)`);
+    });
+
+    const positionString = await readline.question("Выберите цель: ");
+    const position = Number(positionString);
+    if (isNaN(position)) {
+      throw new Error(); // ⚠️ базовый класс такого не обещал
+    }
+
+    const player = this._players.get(position);
+    if (!player) {
+      throw new Error(); // ⚠️ и этого тоже
+    }
+
+    const result = await this._shotgun.execute({
+      target: player.position,
+      initial: this.position,
+    });
+
+    this.events?.onShoot?.({
+      initial: this,
+      target: player,
+      items: this._items,
+      shell: result.shell,
+    });
+
+    return result;
+  }
+}
+```
+
+---
+
+## Что плохо
+
+### 1. Неявные предусловия в ботах
+
+`BasePlayer.execute()` не описывает **предусловия**. Он говорит только: «верну
+`BaseShotgunResult`». Он **не говорит**: «при условии, что игрок жив», «при
+условии, что в игре есть хотя бы один живой игрок», «при условии, что в
+дробовике есть патроны».
+
+Наследники же **молчаливо полагаются** на эти условия:
+
+```typescript
+// RandomBot
+const target = this.chooseRandomTarget()!; // полагается: «есть живой игрок»
+
+// ProbabilityBot
+const liveRoundProbability = liveCount / total; // полагается: total > 0
+const target = sorted[0]!; // полагается: есть враг
+```
+
+Методы `chooseRandomTarget()` и `sorted[0]` **честно возвращают** `undefined`,
+если условия не выполнены:
+
+```typescript
+private chooseRandomTarget(): BasePlayer | undefined {
+  // ...
+  if (alivePlayers.length === 0) return undefined;
+  // ...
+}
+```
+
+Но `execute()` ставит `!` и делает вид, что этого не может быть. Это **разрыв
+между типом и реальностью**: метод говорит «может быть `undefined`», а
+вызывающий код — «не может».
+
+**Почему это нарушение LSP.** Контракт базового класса — это не только
+сигнатура. Это **предусловия, постусловия и инварианты**. Если базовый класс
+обещает «`execute()` вернёт `BaseShotgunResult`», но не описывает, **при каких
+условиях** это обещание действует, — наследник волен полагаться на любую
+интерпретацию. А клиент, вызвавший `execute()` в неподходящем состоянии, получит
+`TypeError` вместо понятной ошибки.
+
+Сейчас условия обеспечиваются **внешним кодом**:
+
+- `Game.nextTurn()` пропускает мёртвых игроков.
+- `Game.execute()` крутится в цикле `while (getAliveCount() > 1)`.
+- `Shotgun.consume()` при опустошении вызывает `reload()`.
+
+То есть в текущей архитектуре всё работает. Но `BasePlayer` об этих правилах
+**не знает** и **не сообщает**. Контракт `execute()` не отражает реальность, и
+это не проверяется ни компилятором, ни рантаймом.
+
+### 2. Исключения вместо результата в Player
+
+`BasePlayer.execute()` обещает вернуть `Promise<BaseShotgunResult>`. Это
+**постусловие**: «после вызова `execute()` у тебя будет `BaseShotgunResult`».
+
+`Player.execute()` **усиливает постусловие**, добавляя новую возможность:
+«...или исключение `Error`». Клиент, вызывающий `execute()` и ожидающий
+результат, не готов ловить `Error` из-за неверного пользовательского ввода.
+
+**Почему это нарушение LSP.** Это самое классическое нарушение: наследник не
+может **усиливать постусловие** родителя. Если родитель обещал «вернётся
+результат», наследник не может добавить «или упадёт с исключением». Подставить
+`Player` вместо `BasePlayer` нельзя без изменения поведения программы — клиенту
+придётся оборачивать каждый вызов в `try/catch`, хотя с ботами это не нужно.
+
+### 3. Разные стратегии выбора цели
+
+Если сравнить `RandomBot` и `ProbabilityBot`:
+
+- `RandomBot` выбирает случайного живого игрока **включая себя**.
+- `ProbabilityBot` предпочитает врага, но если врагов нет, полагается на
+  `sorted[0]!` — и упадёт.
+
+Это не разное поведение (LSP разрешает разное поведение), а **разные
+предусловия**: `RandomBot` работает, если есть хотя бы один живой игрок.
+`ProbabilityBot` работает, только если есть хотя бы один живой **враг**.
+Формально оба «соблюдают» `execute()`, но фактически у них разные требования к
+состоянию игры — и эти требования нигде не зафиксированы.
+
+---
+
+## Улучшенный код
+
+Есть два подхода. Можно применить их **вместе**, а можно выбрать один — в
+зависимости от того, насколько жёстко хочется зафиксировать контракт.
+
+### Шаг 1 — шаблонный метод в BasePlayer
+
+Вынесем всю общую логику в базовый класс, а наследникам оставим только **выбор
+цели**. Тогда `BasePlayer` сам следит за предусловиями, и наследник физически не
+может их нарушить.
+
+```typescript
+export abstract class BasePlayer {
+  // ... поля, конструктор, геттеры
+
+  public async execute(): Promise<BaseShotgunResult> {
+    const alivePlayers = this._players.items.filter((p) => p.alive);
+    if (alivePlayers.length === 0) {
+      throw new Error(`[${this.name}] Нельзя выполнить ход: нет живых игроков`);
+    }
+
+    const target = await this.chooseTarget(alivePlayers);
+    return this.shoot(target);
+  }
+
+  protected abstract chooseTarget(
+    alivePlayers: BasePlayer[],
+  ): Promise<BasePlayer>;
+
+  private async shoot(target: BasePlayer): Promise<BaseShotgunResult> {
+    const result = await this._shotgun.execute({
+      target: target.position,
+      initial: this.position,
+    });
+
+    this.events?.onShoot?.({
+      initial: this,
+      target,
+      items: this._items,
+      shell: result.shell,
+    });
+
+    return result;
+  }
+}
+```
+
+**Что изменилось:**
+
+- Проверка «есть живые игроки» живёт в одном месте — и она гарантированно
+  выполняется перед выбором цели.
+- Логика выстрела и событие `onShoot` — тоже в одном месте. Наследнику не нужно
+  об этом думать.
+- Наследник больше не может **случайно** нарушить контракт `execute()`, потому
+  что не пишет его сам.
+
+### Шаг 2 — боты
+
+Теперь каждый бот реализует только `chooseTarget()`. Он получает
+**гарантированно непустой** массив живых игроков и должен вернуть одного из них.
+
+```typescript
+export class RandomBot extends BasePlayer {
+  protected override async chooseTarget(
+    alivePlayers: BasePlayer[],
+  ): Promise<BasePlayer> {
+    const randomIndex = random.integer(0, alivePlayers.length - 1);
+    return alivePlayers[randomIndex]!;
+  }
+}
+```
+
+```typescript
+export class ProbabilityBot extends BasePlayer {
+  public static readonly AGGRESSIVENESS = 0.1;
+
+  protected override async chooseTarget(
+    alivePlayers: BasePlayer[],
+  ): Promise<BasePlayer> {
+    const remaining = this._shotgun.remainingShells;
+    const total = remaining.length;
+    if (total === 0) {
+      // На всякий случай: если Shotgun вдруг опустеет без reload
+      throw new Error(`[${this.name}] Дробовик пуст`);
+    }
+
+    const liveCount = remaining.filter(
+      (shell) => shell === SHELLS.liveRound,
+    ).length;
+    const blankCount = total - liveCount;
+    const liveRoundProbability = liveCount / total;
+    const blankProbability = blankCount / total;
+
+    console.log(
+      `[${this.name}] (ProBot) Вероятность боевого: ${liveRoundProbability}`,
+    );
+    console.log(
+      `[${this.name}] (ProBot) Вероятность холостого: ${blankProbability}`,
+    );
+
+    if (
+      blankProbability - ProbabilityBot.AGGRESSIVENESS >
+      liveRoundProbability + ProbabilityBot.AGGRESSIVENESS
+    ) {
+      console.log(`[${this.name}] (ProBot) Стреляю в себя`);
+      return this;
+    }
+
+    const enemies = alivePlayers.filter(
+      (player) => player.position !== this.position,
+    );
+    const candidates = enemies.length > 0 ? enemies : alivePlayers;
+
+    return candidates.sort((a, b) => a.health - b.health)[0]!;
+  }
+}
+```
+
+**Что изменилось:**
+
+- Деление на ноль теперь защищено явной проверкой — и это **часть контракта**
+  `chooseTarget`, а не скрытая надежда.
+- Если врагов нет — бот стреляет в себя, а не падает с `TypeError`. Это
+  осознанное решение, а не случайный `!` над `sorted[0]`.
+- `execute()` теперь возвращает `BaseShotgunResult` всегда, когда игра находится
+  в допустимом состоянии.
+
+### Шаг 3 — Player (человек)
+
+Игрок тоже реализует только `chooseTarget()`. Исключения из-за неверного ввода
+нужно **убрать** — вместо них переспрашивать.
+
+```typescript
+export class Player extends BasePlayer {
+  protected override async chooseTarget(
+    alivePlayers: BasePlayer[],
+  ): Promise<BasePlayer> {
+    console.log(`Цели:`);
+    for (const player of alivePlayers) {
+      if (player.position === this.position) {
+        console.log(`${player.position} — в себя (${player.health} ОЗ)`);
+      } else {
+        console.log(
+          `${player.position} — ${player.name} (${player.health} ОЗ)`,
+        );
+      }
+    }
+
+    while (true) {
+      const positionString = await readline.question("Выберите цель: ");
+      const position = Number(positionString);
+
+      if (isNaN(position)) {
+        console.log("Введите число.");
+        continue;
+      }
+
+      const player = alivePlayers.find((p) => p.position === position);
+      if (!player) {
+        console.log("Такой цели нет. Попробуйте ещё раз.");
+        continue;
+      }
+
+      return player;
+    }
+  }
+}
+```
+
+**Что изменилось:**
+
+- `chooseTarget()` больше не выбрасывает исключения — она **переспрашивает**,
+  пока не получит корректный ввод.
+- Рекурсия в `chooseAction()` убрана: `execute()` теперь один раз вызывает
+  `chooseTarget()`, а тот сам крутится в цикле, пока не получит валидный ответ.
+- Контракт `execute()` соблюдён: метод всегда возвращает `BaseShotgunResult` и
+  никогда не падает из-за ввода.
+
+---
+
+## Что мы сделали и зачем
+
+Мы взяли абстрактный класс `BasePlayer`, который обещал «выполнить ход и вернуть
+результат», и три реализации, каждая из которых **по-своему** ломала это
+обещание: одна падала на пустом списке целей, другая — на нуле патронов, третья
+— на неверном вводе.
+
+1. **Явно зафиксировали предусловие.** Базовый класс сам проверяет, что есть
+   живые игроки. Наследник больше не может нарушить это условие — он физически
+   не управляет `execute()`.
+
+2. **Вынесли общую логику в базовый класс (шаблонный метод).** `execute()`
+   теперь отвечает за проверку состояния, вызов `chooseTarget()` и выстрел.
+   Наследник реализует только **свой участок** — выбор цели.
+
+3. **Убрали исключения в `Player`.** Вместо `throw new Error()` — цикл, который
+   переспрашивает пользователя. `execute()` больше не нарушает постусловие
+   «вернуть результат».
+
+4. **Защитили деление на ноль в `ProbabilityBot`.** Явная проверка `total === 0`
+   вместо скрытой надежды на `Shotgun.reload()`.
+
+5. **Наследники стали взаимозаменяемыми.** Любой код, принимающий `BasePlayer`,
+   может вызвать `execute()` и **гарантированно** получить `BaseShotgunResult` —
+   независимо от того, бот это или человек, есть ли враги, есть ли патроны.
+
+---
+
+## Что в итоге
+
+`BasePlayer` — пример того, как один и тот же контракт может быть нарушен
+**тремя разными способами** сразу. Каждый наследник добавил что-то своё: неявное
+предусловие, деление на ноль, исключение из-за ввода. Формально все реализовали
+`execute()`, но **подставить одного вместо другого без изменения поведения
+невозможно**.
+
+> **Запомните:** LSP — это не только про сигнатуру. Это про **контракт
+> целиком**: предусловия, постусловия и инварианты. Если базовый класс обещает
+> «вернётся результат» — он должен описать, **при каких условиях**. Если
+> наследник не может выполнить эти условия — он не должен выбрасывать
+> `TypeError` в рантайме. И если вам приходится выбирать между `!` (сделать вид,
+> что `undefined` не бывает) и `throw new Error()` (упасть вместо возврата) —
+> значит, контракт неполный. Делайте его явным: через шаблонный метод, через
+> защитные проверки, через `Result`-тип. Наследник должен **дополнять**
+> родителя, а не **ломать** его обещания.
+
+---
+
+_Исходный код доступен в
+[репозитории buckshot-bot](https://github.com/FOCKUSTY/buckshot-bot)._

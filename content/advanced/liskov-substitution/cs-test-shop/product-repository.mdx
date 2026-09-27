@@ -1,0 +1,317 @@
+# `IProductRepository` в `CsTestShop`
+
+_согласованный контракт и одна его брешь_
+
+Возьмём пример из
+[CsTestShop](https://github.com/FOCKUSTY/CsTestShop/blob/cc42c6f594b410cb0f7d46b51f0dd7f04d2649df).
+
+В проекте есть интерфейс `IProductRepository` с восемью методами и его
+единственная реализация — `ProductRepository`. Клиенты (`ProductService`,
+`ProductRouter`) работают только с интерфейсом, а DI-контейнер подставляет
+реализацию:
+
+```csharp
+builder.Services.AddScoped<IProductRepository, ProductRepository>();
+```
+
+Это пример **корректной подстановки** — но с одной интересной брешью, которая
+напоминает: LSP — это не только сигнатуры, но и согласованное поведение.
+
+---
+
+## Код
+
+### Интерфейс
+
+```csharp
+public interface IProductRepository
+{
+  Task<Product> GetProduct(int id);
+  Task<IEnumerable<Product>> ProductsList(
+    string nameFilter, int page, int pageSize, CancellationToken token);
+  Task<int> GetTotalCount(string nameFilter, CancellationToken token);
+  Task<Product> CreateProduct(string name, string description, double price, int stock);
+  Task<Product> UpdateProduct(
+    int id, string? name, string? description, double? price, int? stock);
+  Task<bool> DeleteProduct(int id);
+  Task UpdateStock(int productId, int newStock);
+  Task UpdatePrice(int productId, double newPrice);
+}
+```
+
+### Реализация — часть методов
+
+```csharp
+public async Task<Product> GetProduct(int id)
+{
+  // SELECT ... WHERE id = @id
+  if (!await reader.ReadAsync())
+  {
+    throw new KeyNotFoundException($"Product {id} not found.");   // ✅ бросает
+  }
+  // ...
+}
+
+public async Task<Product> UpdateProduct(
+  int id, string? name, string? description, double? price, int? stock)
+{
+  // UPDATE ... RETURNING ...
+  if (!await reader.ReadAsync())
+  {
+    throw new KeyNotFoundException($"Product {id} not found.");   // ✅ бросает
+  }
+  // ...
+}
+
+public async Task<bool> DeleteProduct(int id)
+{
+  // DELETE FROM products WHERE id = @id
+  int rows = await command.ExecuteNonQueryAsync();
+  return rows > 0;                                                // ✅ возвращает bool
+}
+
+public async Task UpdateStock(int productId, int newStock)
+{
+  // UPDATE products SET stock = @stock WHERE id = @id
+  await command.ExecuteNonQueryAsync();                            // ⚠️ молчит
+}
+
+public async Task UpdatePrice(int productId, double newPrice)
+{
+  // UPDATE products SET price = @price WHERE id = @id
+  await command.ExecuteNonQueryAsync();                            // ⚠️ молчит
+}
+```
+
+### Клиент — `ProductService`
+
+```csharp
+public class ProductService(IProductRepository repository) : IProductService
+{
+  public async Task<Product> GetProduct(int id)
+  {
+    return await repository.GetProduct(id);
+  }
+
+  public async Task<Product> UpdateProduct(
+    int id, string? name, string? description, double? price, int? stock)
+  {
+    return await repository.UpdateProduct(id, name, description, price, stock);
+  }
+
+  public async Task UpdateStock(int productId, int newStock)
+  {
+    await repository.UpdateStock(productId, newStock);
+  }
+  // ...
+}
+```
+
+`ProductService` не знает о `ProductRepository` — он работает только с
+интерфейсом.
+
+---
+
+## Что здесь хорошо
+
+### 1. Сигнатуры совпадают с обещаниями
+
+Все восемь методов возвращают ровно те типы, которые объявлены в интерфейсе.
+Никаких `null` там, где ожидается `Product`. Никаких методов, которых нет в
+контракте.
+
+### 2. Клиент работает только через абстракцию
+
+`ProductService` не знает о PostgreSQL, `NpgsqlConnection` и SQL-запросах. Это
+позволяет подменять реализацию без изменения клиента и легко мокать её в тестах.
+
+### 3. Единая стратегия для «не найдено» — в большинстве методов
+
+`GetProduct` и `UpdateProduct` при отсутствии записи бросают
+`KeyNotFoundException` с одинаковой формулировкой. Это важное свойство
+контракта: клиент может написать единый обработчик:
+
+```csharp
+try
+{
+  var product = await repository.UpdateProduct(id, name, null, null, null);
+}
+catch (KeyNotFoundException)
+{
+  // Продукт не найден — обрабатываем одинаково, независимо от метода
+}
+```
+
+### 4. `DeleteProduct` возвращает `bool`
+
+Возвращаемый `bool` — это **часть контракта**: клиент знает, что метод скажет
+«удалили / нечего было удалять». Это не «усиление постусловия», а явно
+объявленная возможность.
+
+---
+
+## Что плохо
+
+### `UpdateStock` и `UpdatePrice` выбиваются из общей стратегии
+
+Посмотри на поведение методов при отсутствии записи:
+
+| Метод             | Поведение при ненайденной записи              |
+| ----------------- | --------------------------------------------- |
+| `GetProduct`      | `KeyNotFoundException`                        |
+| `UpdateProduct`   | `KeyNotFoundException`                        |
+| `DeleteProduct`   | `false` (запись не найдена — вернуть `false`) |
+| **`UpdateStock`** | **молча ничего не делает** ⚠️                 |
+| **`UpdatePrice`** | **молча ничего не делает** ⚠️                 |
+
+Формально сигнатуры совпадают с интерфейсом: `Task UpdateStock(...)` возвращает
+`Task`, `await` завершается без ошибок. Но **поведение непоследовательно**.
+Клиент, привыкший к тому, что «операции над несуществующей записью бросают
+`KeyNotFoundException`», после вызова `UpdateStock` для несуществующего id не
+получит ни ошибки, ни обратной связи — просто ничего не произойдёт.
+
+### Почему это проблема с точки зрения LSP
+
+На первый взгляд кажется, что LSP тут ни при чём: интерфейс один, реализация
+одна, никаких подтипов. Но LSP — это не только про иерархию классов, это про
+**контракт**, который видит клиент.
+
+Неявный контракт `IProductRepository`, выведенный из использования, звучит так:
+
+> «Если запись не найдена, метод **как-то сообщает об этом**: либо исключением,
+> либо возвращаемым значением».
+
+Это сообщение — часть контракта. Клиент полагается на него. `UpdateStock` и
+`UpdatePrice` этот контракт **нарушают**: они обманывают ожидание клиента,
+ничего не сообщая.
+
+А теперь представь, что кто-то добавит вторую реализацию `IProductRepository` —
+например, `CachedProductRepository` или `LoggingProductRepository`. Разработчик
+посмотрит на `ProductRepository`, увидит, что «при отсутствии записи бросается
+`KeyNotFoundException`», и сделает то же самое во всех методах. Тогда:
+
+- `ProductRepository.UpdateStock` — молча ничего не делает
+- `CachedProductRepository.UpdateStock` — бросает `KeyNotFoundException`
+
+Две реализации одного интерфейса ведут себя **по-разному** в одинаковой
+ситуации. Это уже **классическое LSP-нарушение** — то самое, что описано в
+определении принципа: «подстановка одной реализации вместо другой не должна
+менять поведение программы».
+
+### Самое коварное
+
+Сейчас этого не видно, потому что реализация одна. Ошибка не проявляется до тех
+пор, пока кто-то не начнёт писать вторую реализацию или не удивится, что
+`UpdateStock` «не работает». Это та же разновидность проблемы, что и в
+`IUserRepository`, только наоборот: там несоответствие было видно сразу
+(`NotImplementedException`), а здесь оно спрятано в молчаливом `return`.
+
+---
+
+## Улучшенный код
+
+Приведём `UpdateStock` и `UpdatePrice` к той же стратегии, что и
+`UpdateProduct`:
+
+```csharp
+public async Task UpdateStock(int productId, int newStock)
+{
+  await using var connection = new NpgsqlConnection(_connection_string);
+  await connection.OpenAsync();
+
+  const string sql = "UPDATE products SET stock = @stock WHERE id = @id";
+
+  await using var command = new NpgsqlCommand(sql, connection);
+  command.Parameters.AddWithValue("stock", newStock);
+  command.Parameters.AddWithValue("id", productId);
+
+  int rows = await command.ExecuteNonQueryAsync();
+  if (rows == 0)
+  {
+    throw new KeyNotFoundException($"Product {productId} not found.");
+  }
+}
+
+public async Task UpdatePrice(int productId, double newPrice)
+{
+  await using var connection = new NpgsqlConnection(_connection_string);
+  await connection.OpenAsync();
+
+  const string sql = "UPDATE products SET price = @price WHERE id = @id";
+  await using var command = new NpgsqlCommand(sql, connection);
+  command.Parameters.AddWithValue("price", newPrice);
+  command.Parameters.AddWithValue("id", productId);
+
+  int rows = await command.ExecuteNonQueryAsync();
+  if (rows == 0)
+  {
+    throw new KeyNotFoundException($"Product {productId} not found.");
+  }
+}
+```
+
+**Что изменилось:** все методы, работающие с одной конкретной записью, теперь
+ведут себя **одинаково** при её отсутствии. `ProductRepository` стал
+**предсказуемым** — клиент может написать один `try/catch` и не думать о том,
+какой метод он вызывает.
+
+### Альтернатива — единый стиль через `bool`
+
+Если тебе больше нравится стиль `DeleteProduct` (возвращает `bool`), можно пойти
+другим путём: сделать все «update/delete» методы возвращающими `bool`:
+
+```csharp
+Task<bool> UpdateStock(int productId, int newStock);
+Task<bool> UpdatePrice(int productId, double newPrice);
+```
+
+Тогда `ProductRepository` вернёт `false` при отсутствии записи, а клиент получит
+явный ответ. Главное — **единообразие**: все методы должны придерживаться одной
+стратегии. Смешивать — нельзя.
+
+---
+
+## Что мы сделали и зачем
+
+Мы взяли `IProductRepository`, который в целом соблюдает LSP, и нашли в нём
+**брешь в контракте**: методы `UpdateStock` и `UpdatePrice` ведут себя иначе,
+чем остальные методы того же интерфейса.
+
+1. **Обнаружили несоответствие поведения.** `GetProduct` и `UpdateProduct`
+   бросают `KeyNotFoundException`, а `UpdateStock` и `UpdatePrice` молча
+   игнорируют отсутствие записи. Один и тот же интерфейс — разное поведение в
+   одинаковой ситуации.
+
+2. **Поняли, почему это проблема LSP, хотя подтипов нет.** LSP — это про
+   **контракт**, а не только про иерархию. Неявный контракт интерфейса говорит:
+   «отсутствие записи должно быть обнаружено клиентом». Два метода его нарушают.
+
+3. **Предсказали, как это проявится.** Первая же вторая реализация
+   `IProductRepository` (кэширующая, логирующая, мок для тестов) может выбрать
+   другую стратегию — и тогда две реализации одного интерфейса начнут вести себя
+   по-разному. Это классический LSP-разрыв.
+
+4. **Привели стратегию к единому виду.** Все методы теперь либо бросают
+   `KeyNotFoundException`, либо возвращают `bool` — согласованно.
+
+---
+
+## Что в итоге
+
+`IProductRepository` — пример того, что LSP соблюдается **не только
+сигнатурами**, но и **единообразным поведением** всех методов контракта.
+Сигнатуры везде правильные, но клиент получает разный опыт от разных методов — и
+это брешь.
+
+> **Запомните:** LSP — это не только про подтипы. Это про **предсказуемость
+> контракта**. Если интерфейс говорит «отсутствие записи — это ошибка», то все
+> методы, работающие с одной записью, должны вести себя одинаково. Если один
+> метод бросает `KeyNotFoundException`, а другой молча ничего не делает — клиент
+> не может писать общий код. А когда появится вторая реализация, она может
+> выбрать третью стратегию — и тогда подстановка сломается. **Единообразие
+> поведения внутри интерфейса — это часть LSP.**
+
+---
+
+_Исходный код доступен в
+[репозитории CsTestShop](https://github.com/FOCKUSTY/CsTestShop/blob/cc42c6f594b410cb0f7d46b51f0dd7f04d2649df)._

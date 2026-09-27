@@ -1,0 +1,302 @@
+# Чек-лист: не нарушаете ли вы LSP?
+
+> Раздел для самостоятельной проверки кода. Пройдите по пунктам и честно
+> ответьте себе на каждый вопрос. Если хотя бы на один ответ «да» — задумайтесь
+> о рефакторинге.
+
+---
+
+## Вопросы
+
+**1. Требует ли наследник больше, чем родитель?**
+
+Усиление предусловий — классическое нарушение. Если базовый тип обещал «сохранит
+любую сущность», а наследник требует `id` — клиент не готов к такому условию.
+
+```typescript
+// Плохо
+class StrictRepository implements Repository {
+  public async save(entity: Entity): Promise<void> {
+    if (!entity.id) throw new Error("Entity must have id"); // ⚠️
+    // ...
+  }
+}
+
+// Хорошо — требование вынесено в контракт родителя
+type Repository = {
+  save(entity: EntityWithId): Promise<void>;
+};
+```
+
+---
+
+**2. Возвращает ли наследник меньше, чем обещает родитель?**
+
+Ослабление постусловий. Если родитель обещал `Result`, а наследник возвращает
+`Result | null` — клиент, не проверяющий `null`, упадёт с `TypeError`.
+
+```typescript
+// Плохо
+class LenientParser implements Parser {
+  public parse(input: string): Result {
+    if (!input) return null; // ⚠️ родитель не обещал null
+    // ...
+  }
+}
+
+// Хорошо — null стал частью контракта
+type Parser = {
+  parse(input: string): Result | null;
+};
+```
+
+---
+
+**3. Бросает ли наследник исключения там, где родитель их не бросал?**
+
+Клиент, вызывающий метод без `try/catch`, получит неожиданное исключение. Ему
+придётся оборачивать каждый вызов — хотя с другими реализациями это не нужно.
+
+```typescript
+// Плохо
+class HumanPlayer extends BasePlayer {
+  public async execute(): Promise<ShotResult> {
+    const input = await readline.question("Цель: ");
+    if (isNaN(Number(input))) throw new Error("Invalid input"); // ⚠️
+    // ...
+  }
+}
+
+// Хорошо — переспрашиваем вместо падения
+while (true) {
+  const input = await readline.question("Цель: ");
+  const position = Number(input);
+  if (isNaN(position)) {
+    console.log("Введите число.");
+    continue;
+  }
+  return result;
+}
+```
+
+---
+
+**4. Ставите ли вы `!` там, где метод честно возвращает `T | undefined`?**
+
+Разрыв между типом и реальностью. Метод говорит «может быть `undefined`»,
+вызывающий код ставит `!` и делает вид, что этого не может быть. В неподходящем
+состоянии — `TypeError` в рантайме.
+
+```typescript
+// Плохо
+const target = this.chooseRandomTarget()!; // метод возвращает T | undefined
+
+// Хорошо — предусловие зафиксировано в базовом классе
+abstract class BasePlayer {
+  public async execute(): Promise<ShotResult> {
+    const alive = this._players.items.filter((p) => p.alive);
+    if (alive.length === 0) {
+      throw new Error("Нельзя выполнить ход: нет живых игроков");
+    }
+    const target = await this.chooseTarget(alive); // не пустой массив
+    // ...
+  }
+
+  protected abstract chooseTarget(alive: BasePlayer[]): Promise<BasePlayer>;
+}
+```
+
+---
+
+**5. Ведут ли себя все реализации одного интерфейса одинаково в одинаковой
+ситуации?**
+
+Если один метод бросает `KeyNotFoundException`, а другой молча ничего не делает
+— клиент не может написать общий обработчик.
+
+```csharp
+// Плохо — разная стратегия в одном интерфейсе
+public async Task<Product> GetProduct(int id) {
+  if (!await reader.ReadAsync()) throw new KeyNotFoundException(); // ⚠️
+}
+
+public async Task UpdateStock(int productId, int newStock) {
+  await command.ExecuteNonQueryAsync(); // ⚠️ молча игнорирует
+}
+
+// Хорошо — единая стратегия
+public async Task UpdateStock(int productId, int newStock) {
+  int rows = await command.ExecuteNonQueryAsync();
+  if (rows == 0) throw new KeyNotFoundException($"Product {productId} not found.");
+}
+```
+
+---
+
+**6. Выполняется ли проверка предусловия в одном месте у всех реализаций?**
+
+Если одна реализация проверяет `telegramId` до побочных эффектов, а другая —
+после, клиент не может предсказать, произойдут ли побочные эффекты.
+
+```typescript
+// Плохо — разный порядок операций
+// RegistrationConversation: сначала проверка, external нет
+const telegramId = context.from?.id;
+if (!telegramId) return;
+
+// ScheduleConversation: сначала external, потом проверка
+const session = await conversation.external(({ session }) => session);
+const telegramId = context.from?.id;
+if (!telegramId) throw new Error("id is not defined.");
+
+// Хорошо — проверка в базовом классе
+export abstract class BaseConversation {
+  public async execute(conversation, context): Promise<void> {
+    const telegramId = context.from?.id;
+    if (!telegramId) throw new Error("User ID is not defined in context");
+    await this.run(conversation, context, telegramId);
+  }
+
+  protected abstract run(
+    conversation,
+    context,
+    telegramId: number,
+  ): Promise<void>;
+}
+```
+
+---
+
+**7. Наследуете ли вы только потому, что классы «похожи»?**
+
+Классика: `Penguin extends Bird`, но пингвин не летает. Наследование «похоже,
+значит, подходит» — источник нарушения LSP.
+
+```typescript
+// Плохо
+class Bird {
+  public fly(): void {
+    /* ... */
+  }
+}
+class Penguin extends Bird {
+  public override fly(): void {
+    throw new Error("I can't fly!");
+  } // ⚠️
+}
+
+// Хорошо — разделяем интерфейсы по возможностям
+type Bird = { eat(): void; sleep(): void };
+type FlyingBird = Bird & { fly(): void };
+class Sparrow implements FlyingBird {
+  /* ... */
+}
+class Penguin implements Bird {
+  /* ... */
+}
+```
+
+---
+
+**8. Нарушает ли наследник инварианты родителя?**
+
+Если родитель гарантировал «`width` и `height` независимы», а наследник ломает
+этот инвариант — клиент получит не то, что ожидал.
+
+```typescript
+// Плохо
+class Square extends Rectangle {
+  public override set width(width: number) {
+    this._width = width;
+    this._height = width; // ⚠️ нарушает независимость
+  }
+}
+
+// Хорошо — композиция вместо наследования
+type Shape = { getArea(): number };
+class Rectangle implements Shape {
+  /* ... */
+}
+class Square implements Shape {
+  /* ... */
+}
+```
+
+---
+
+**9. Бросает ли реализация `NotImplementedException`?**
+
+**Важно:** это **не всегда** нарушение LSP. Различайте два состояния:
+
+- **WIP** — метод ещё не написан, стоит TODO, есть issue. Это **не** нарушение:
+  незавершённый код не анализируется принципом подстановки.
+- **Осознанный отказ** — метод никогда не будет реализован, но остался в
+  интерфейсе «на будущее». Вот **это** — LSP-нарушение.
+
+```csharp
+// WIP — не нарушение, оставьте как есть
+public Task<User> UpdateUser(...) {
+  throw new NotImplementedException("TODO: implement in #123"); // 🚧
+}
+
+// Осознанный отказ — уберите метод из интерфейса
+public interface IUserReader { Task<User> GetUser(int id); }
+public interface IUserWriter { Task<User> CreateUser(...); }
+```
+
+---
+
+**10. Проходят ли ваши тесты при подстановке любой реализации интерфейса?**
+
+Напишите один тест — для всех реализаций. Если какая-то не проходит — контракт
+нарушен.
+
+```csharp
+[Theory]
+[InlineData(typeof(ProductRepository))]
+[InlineData(typeof(CachedProductRepository))]
+public async Task UpdateStock_ThrowsWhenNotFound(Type type)
+{
+  var repo = (IProductRepository)Activator.CreateInstance(type)!;
+  await Assert.ThrowsAsync<KeyNotFoundException>(
+    () => repo.UpdateStock(999, 10)
+  );
+}
+```
+
+---
+
+## Итоговый подсчёт
+
+| Количество «да» | Уровень нарушения LSP                             |
+| --------------- | ------------------------------------------------- |
+| 0–2             | Отлично! Ваш код соблюдает LSP.                   |
+| 3–5             | Есть нарушения. Начните с самых критичных мест.   |
+| 6–8             | Серьёзные проблемы. Система требует рефакторинга. |
+| 9–10            | Код негибкий. Пересмотрите архитектуру.           |
+
+---
+
+## Что делать, если вы нарушаете LSP?
+
+1. **Найдите точки подстановки** — DI-контейнер, фабрики, `new` в коде.
+2. **Проверьте контракт** — что обещает базовый тип, что делает наследник.
+3. **Зафиксируйте общее в базовом классе** — шаблонный метод, защитные проверки,
+   единый порядок операций.
+4. **Уберите `!` и неожиданные исключения** — сделайте ошибку частью контракта
+   или уберите её.
+5. **Приведите стратегии к единому виду** — все методы интерфейса должны вести
+   себя одинаково в одинаковой ситуации.
+6. **Пишите тесты на подстановку** — один тест, все реализации.
+7. **Помните про WIP** — `NotImplementedException` не LSP, если код не завершён.
+
+---
+
+> **Запомните:** LSP — это не только про сигнатуру, а про **контракт целиком**:
+> предусловия, постусловия, инварианты. Самое коварное — ошибка не проявляется,
+> пока не подставишь другую реализацию в реальном сценарии. Анализируйте
+> **завершённый** код. WIP — вне принципа.
+
+---
+
+_Пользуйтесь этим чек-листом при код-ревью и рефакторинге._
